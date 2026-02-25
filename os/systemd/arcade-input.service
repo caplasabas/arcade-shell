@@ -1,0 +1,24 @@
+[Unit]
+Description=Arcade Input Service
+After=network.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/arcade1/arcade/apps/service
+
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/arcade1/.Xauthority
+
+ExecStart=/usr/bin/node input.js
+
+Restart=always
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=Arcade Xorg + Chromium Kiosk
+After=arcade-input.service systemd-user-sessions.service arcade-splash.service
+Requires=arcade-input.service arcade-splash.service
+
+[Service]
+User=arcade1
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/arcade1/.Xauthority
+
+TTYPath=/dev/tty2
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp
+
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
