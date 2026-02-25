@@ -42,6 +42,7 @@ const JOYSTICK_BUTTON_MAP = {
   8: 'BUY',
   9: 'MENU',
   10: 'AUDIO',
+  11: 'HOPPER_COIN',
 }
 
 const RAW_BUTTON_MAP = {
@@ -54,7 +55,12 @@ const RAW_BUTTON_MAP = {
   294: 6,
   295: 7,
   296: 8,
+  297: 9,
+  298: 10,
+  299: 11,
 }
+
+const HOPPER_TOPUP_COIN_VALUE = 20
 
 // Coin timing (measured FAST mode)
 const COIN_IDLE_GAP_MS = 130
@@ -461,13 +467,31 @@ function handleRawAxis(source, code, value) {
 
   if (!retroarchActive) {
     if (code === 0) {
-      if (value < DEAD_LOW) dispatch({ type: 'PLAYER', player: source, button: 'LEFT' })
-      else if (value > DEAD_HIGH) dispatch({ type: 'PLAYER', player: source, button: 'RIGHT' })
+      if (value < DEAD_LOW) {
+        if (source === 'P1') {
+          console.log('[MODAL DEBUG] P1 joystick LEFT')
+        }
+        dispatch({ type: 'PLAYER', player: source, button: 'LEFT' })
+      } else if (value > DEAD_HIGH) {
+        if (source === 'P1') {
+          console.log('[MODAL DEBUG] P1 joystick RIGHT')
+        }
+        dispatch({ type: 'PLAYER', player: source, button: 'RIGHT' })
+      }
     }
 
     if (code === 1) {
-      if (value < DEAD_LOW) dispatch({ type: 'PLAYER', player: source, button: 'UP' })
-      else if (value > DEAD_HIGH) dispatch({ type: 'PLAYER', player: source, button: 'DOWN' })
+      if (value < DEAD_LOW) {
+        if (source === 'P1') {
+          console.log('[MODAL DEBUG] P1 joystick UP')
+        }
+        dispatch({ type: 'PLAYER', player: source, button: 'UP' })
+      } else if (value > DEAD_HIGH) {
+        if (source === 'P1') {
+          console.log('[MODAL DEBUG] P1 joystick DOWN')
+        }
+        dispatch({ type: 'PLAYER', player: source, button: 'DOWN' })
+      }
     }
 
     return
@@ -526,7 +550,7 @@ function handleKey(source, index, value) {
     if (value !== 1) return // only act on press for casino
     const casinoAction = JOYSTICK_BUTTON_MAP[index]
 
-    if (casinoAction === 'TURBO') {
+    if (casinoAction === 'MENU') {
       if (retroarchActive && retroarchProcess) {
         retroarchProcess.kill('SIGTERM')
 
@@ -537,7 +561,7 @@ function handleKey(source, index, value) {
           }
         }, 3000)
       } else {
-        dispatch({ type: 'ACTION', action: 'TURBO' })
+        dispatch({ type: 'ACTION', action: 'MENU' })
       }
       return
     }
@@ -545,6 +569,12 @@ function handleKey(source, index, value) {
     switch (casinoAction) {
       case 'COIN':
         handleDepositPulse()
+        break
+      case 'HOPPER_COIN':
+        dispatch({
+          type: 'HOPPER_COIN',
+          amount: HOPPER_TOPUP_COIN_VALUE,
+        })
         break
       case 'WITHDRAW_COIN':
         handleWithdrawPulse()
@@ -571,6 +601,12 @@ function routePlayerInput(source, index, value) {
     sendVirtual(target, EV_KEY, keyCode, value)
   } else {
     if (value !== 1) return
+
+    if (source === 'P1' && (index === 0 || index === 1)) {
+      console.log(
+        `[MODAL DEBUG] P1 button ${index} press (${index === 0 ? 'confirm/select' : 'dismiss keyboard'})`,
+      )
+    }
 
     dispatch({
       type: 'PLAYER',

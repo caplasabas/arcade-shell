@@ -1,15 +1,37 @@
-// components/NoInternetModal.tsx
+import { useEffect, useRef } from 'react'
 
 type Props = {
   onConnect: () => void
 }
 
 export function NoInternetModal({ onConnect }: Props) {
+  const connectButtonRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    connectButtonRef.current?.focus()
+
+    const onArcadeInput = (event: Event) => {
+      const customEvent = event as CustomEvent<{ button?: string | number }>
+      if (customEvent.detail?.button === 0) {
+        onConnect()
+      }
+    }
+
+    window.addEventListener('ARCADE_MODAL_INPUT', onArcadeInput)
+    return () => window.removeEventListener('ARCADE_MODAL_INPUT', onArcadeInput)
+  }, [onConnect])
+
   return (
-    <div className="modal-backdrop">
-      <div className="modal-card">
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="no-internet-title"
+      onMouseDown={event => event.preventDefault()}
+    >
+      <div className="modal-card" onMouseDown={event => event.stopPropagation()}>
         <div className="modal-header">
-          <h2>Network Required</h2>
+          <h2 id="no-internet-title">Network Required</h2>
         </div>
 
         <div className="modal-body">
@@ -23,7 +45,7 @@ export function NoInternetModal({ onConnect }: Props) {
         </div>
 
         <div className="modal-actions">
-          <button className="modal-confirm" onClick={onConnect}>
+          <button ref={connectButtonRef} className="modal-confirm" onClick={onConnect}>
             Connect
           </button>
         </div>

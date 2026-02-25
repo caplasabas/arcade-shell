@@ -24,43 +24,134 @@ export function subscribeToGames(
   onChange: () => void,
   onDisable?: (gameId: string) => void,
 ) {
-  const channel = supabase
-    .channel(`games-${deviceId}`)
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'games' }, payload => {
-      const oldRow = payload.old
-      const newRow = payload.new
+  let disposed = false
+  let reconnectTimer: number | null = null
+  let channel: ReturnType<typeof supabase.channel> | null = null
 
-      const relevant = oldRow.enabled !== newRow.enabled || oldRow.version !== newRow.version
+  const scheduleReconnect = () => {
+    if (disposed || reconnectTimer) return
 
-      if (!relevant) return
-
-      if (newRow.enabled === false && onDisable) {
-        onDisable(newRow.id)
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null
+      if (!disposed) {
+        connect()
       }
+    }, 1500)
+  }
 
-      onChange()
-    })
-    .subscribe()
+  const connect = () => {
+    if (disposed) return
+    if (channel) {
+      supabase.removeChannel(channel)
+      channel = null
+    }
 
-  return () => supabase.removeChannel(channel)
+    channel = supabase
+      .channel(`games-${deviceId}-${Date.now()}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'games' }, payload => {
+        const oldRow = payload.old
+        const newRow = payload.new
+
+        const relevant = oldRow.enabled !== newRow.enabled || oldRow.version !== newRow.version
+        if (!relevant) return
+
+        if (newRow.enabled === false && onDisable) {
+          onDisable(newRow.id)
+        }
+
+        onChange()
+      })
+      .subscribe(status => {
+        if (disposed) return
+
+        if (status === 'SUBSCRIBED') {
+          onChange()
+          return
+        }
+
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          scheduleReconnect()
+        }
+      })
+  }
+
+  connect()
+
+  return () => {
+    disposed = true
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    if (channel) {
+      supabase.removeChannel(channel)
+      channel = null
+    }
+  }
 }
 
 export function subscribeToCabinetGames(deviceId: string, onChange: () => void) {
-  const channel = supabase
-    .channel(`cabinet-games-${deviceId}`)
-    .on(
-      'postgres_changes',
-      {
-        event: '*',
-        schema: 'public',
-        table: 'cabinet_games',
-        filter: `device_id=eq.${deviceId}`,
-      },
-      () => {
-        onChange()
-      },
-    )
-    .subscribe()
+  let disposed = false
+  let reconnectTimer: number | null = null
+  let channel: ReturnType<typeof supabase.channel> | null = null
 
-  return () => supabase.removeChannel(channel)
+  const scheduleReconnect = () => {
+    if (disposed || reconnectTimer) return
+
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null
+      if (!disposed) {
+        connect()
+      }
+    }, 1500)
+  }
+
+  const connect = () => {
+    if (disposed) return
+    if (channel) {
+      supabase.removeChannel(channel)
+      channel = null
+    }
+
+    channel = supabase
+      .channel(`cabinet-games-${deviceId}-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'cabinet_games',
+          filter: `device_id=eq.${deviceId}`,
+        },
+        () => {
+          onChange()
+        },
+      )
+      .subscribe(status => {
+        if (disposed) return
+
+        if (status === 'SUBSCRIBED') {
+          onChange()
+          return
+        }
+
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          scheduleReconnect()
+        }
+      })
+  }
+
+  connect()
+
+  return () => {
+    disposed = true
+    if (reconnectTimer) {
+      window.clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    if (channel) {
+      supabase.removeChannel(channel)
+      channel = null
+    }
+  }
 }

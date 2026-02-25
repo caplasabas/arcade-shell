@@ -12,7 +12,9 @@
     "service": "npm run --workspace apps/service start",
     "ui:build": "npm run --workspace apps/ui build",
     "ui:preview": "npm run --workspace apps/ui preview",
-    "service:dev": "npm run --workspace apps/service dev"
+    "service:dev": "npm run --workspace apps/service dev",
+    "pi:sync": "bash scripts/pi-sync.sh",
+    "pi:watch": "bash scripts/pi-sync-watch.sh"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.49.0",

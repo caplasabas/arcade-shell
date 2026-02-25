@@ -7,10 +7,10 @@ import { WifiSetupModal } from './components/WifiSetupModal'
 import { exitGame, isGameRunning, launchGame } from './lib/gameLoader'
 import { fetchDeviceBalance, subscribeToDeviceBalance } from './lib/balance'
 import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './lib/games'
-import { logLedgerEvent } from './lib/accounting'
 import { WithdrawModal } from './components/WithdrawModal'
 
 import { ensureDeviceRegistered } from './lib/device'
+import { flushMetricEvents, queueMetricEvent } from './lib/metrics'
 
 import { formatPeso } from './utils'
 
@@ -194,21 +194,83 @@ export default function App() {
     }
   }, [deviceId, runningGame])
 
+  useEffect(() => {
+    if (!deviceId) return
+    if (!initialized) return
+    if (networkStage !== 'ok') return
+
+    let cancelled = false
+    let inFlight = false
+
+    const hardSync = async () => {
+      if (inFlight || cancelled) return
+      inFlight = true
+
+      try {
+        const [nextBalance, nextGames] = await Promise.all([
+          fetchDeviceBalance(deviceId),
+          fetchCabinetGames(deviceId),
+        ])
+
+        if (cancelled) return
+
+        setBalance(nextBalance)
+        setGames(nextGames)
+
+        const current = runningGameRef.current
+        if (current && !nextGames.find(g => g.id === current.id)) {
+          handleExitGame()
+        }
+
+        setFocus(prev => {
+          if (prev >= nextGames.length) {
+            return Math.max(0, nextGames.length - 1)
+          }
+          return prev
+        })
+      } catch {
+        // Ignore transient fetch issues; network state handler already controls offline mode.
+      } finally {
+        inFlight = false
+      }
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        hardSync()
+      }
+    }
+
+    const onFocus = () => hardSync()
+    const onOnline = () => hardSync()
+
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('online', onOnline)
+    document.addEventListener('visibilitychange', onVisibility)
+
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        hardSync()
+      }
+    }, 15000)
+
+    hardSync()
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('online', onOnline)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.clearInterval(interval)
+    }
+  }, [deviceId, initialized, networkStage])
+
   const addBalance = (source = 'coin', amount = 5) => {
     const id = deviceIdRef.current
     if (!id) return
 
     setBalance(prev => prev + amount)
-
-    logLedgerEvent({
-      deviceId: id,
-      type: 'deposit',
-      amount,
-      source,
-    }).catch(e => {
-      console.log('LEDGER EVENT', e)
-      setBalance(prev => prev - amount)
-    })
+    queueMetricEvent(id, 'coins_in', amount)
   }
 
   const minusBalance = (source = 'hopper', amount = 20) => {
@@ -216,16 +278,29 @@ export default function App() {
     if (!id) return
 
     setBalance(prev => prev - amount)
+    if (source === 'hopper') {
+      queueMetricEvent(id, 'withdrawal', amount)
+    }
+  }
 
-    logLedgerEvent({
-      deviceId: id,
-      type: 'withdrawal',
-      amount,
-      source,
-    }).catch(e => {
-      console.log('LEDGER EVENT', e)
-      setBalance(prev => prev + amount)
-    })
+  const addHopperBalance = (amount = 20) => {
+    const id = deviceIdRef.current
+    if (!id) return
+    queueMetricEvent(id, 'hopper_in', amount)
+  }
+
+  const recordBet = (amount = 0) => {
+    const id = deviceIdRef.current
+    if (!id || amount <= 0) return
+    setBalance(prev => prev - amount)
+    queueMetricEvent(id, 'bet', amount)
+  }
+
+  const recordWin = (amount = 0) => {
+    const id = deviceIdRef.current
+    if (!id || amount <= 0) return
+    setBalance(prev => prev + amount)
+    queueMetricEvent(id, 'win', amount)
   }
 
   const addWithdrawAmount = () => {
@@ -296,6 +371,34 @@ export default function App() {
   }, [selectedGame])
 
   useEffect(() => {
+    const interval = window.setInterval(() => {
+      void flushMetricEvents()
+    }, 1200)
+
+    const flushNow = () => {
+      void flushMetricEvents()
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        flushNow()
+      }
+    }
+
+    window.addEventListener('beforeunload', flushNow)
+    window.addEventListener('pagehide', flushNow)
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('beforeunload', flushNow)
+      window.removeEventListener('pagehide', flushNow)
+      document.removeEventListener('visibilitychange', onVisibility)
+      flushNow()
+    }
+  }, [])
+
+  useEffect(() => {
     let exitHoldStart = 0
 
     window.__ARCADE_INPUT__ = payload => {
@@ -328,6 +431,27 @@ export default function App() {
         return
       }
 
+      if (
+        payload.type === 'PLAYER' &&
+        payload.player === 'P1' &&
+        networkStageRef.current !== 'ok'
+      ) {
+        const button = payload.button
+
+        if (networkStageRef.current === 'no-internet' && button === 0) {
+          setNetworkStage('wifi-form')
+          return
+        }
+
+        window.dispatchEvent(
+          new CustomEvent('ARCADE_MODAL_INPUT', {
+            detail: { button },
+          }),
+        )
+
+        return
+      }
+
       if (networkStageRef.current !== 'ok') return
 
       console.log('[MENU]', payload)
@@ -346,6 +470,21 @@ export default function App() {
             .catch(() => {})
         }
 
+        return
+      }
+
+      if (payload.type === 'HOPPER_COIN') {
+        addHopperBalance(payload.amount ?? 20)
+        return
+      }
+
+      if (payload.type === 'BET') {
+        recordBet(payload.amount ?? 0)
+        return
+      }
+
+      if (payload.type === 'WIN') {
+        recordWin(payload.amount ?? 0)
         return
       }
 
@@ -387,7 +526,7 @@ export default function App() {
         }
 
         switch (payload.action) {
-          case 'TURBO': {
+          case 'MENU': {
             if (s.showWithdrawModal) {
               setShowWithdrawModalRef.current(false)
               return
@@ -641,10 +780,7 @@ export default function App() {
         )}
 
         {networkStage === 'wifi-form' && (
-          <WifiSetupModal
-            onConnected={() => setNetworkStage('ok')}
-            onCancel={() => setNetworkStage('no-internet')}
-          />
+          <WifiSetupModal onConnected={() => setNetworkStage('ok')} />
         )}
       </>
     )
