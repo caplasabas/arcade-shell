@@ -1,0 +1,26 @@
+.grid-viewport {
+    position: relative;
+    width: 100vw;
+    height: calc(100vh);
+    overflow-y: auto;
+
+    padding: 8rem 10rem 9rem 10rem;
+
+    display: flex;
+    justify-content: center;
+    box-sizing: border-box;
+}
+
+.grid {
+    height: 100%;
+    width: 100%;
+
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-auto-rows: 1fr;
+
+    gap: 2rem;
+    /*padding: 32px;*/
+
+    scroll-behavior: smooth;
+}

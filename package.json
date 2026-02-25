@@ -1,0 +1,30 @@
+{
+  "name": "arcade-shell",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "ui": "npm run --workspace apps/ui dev",
+    "service": "npm run --workspace apps/service start",
+    "ui:build": "npm run --workspace apps/ui build",
+    "ui:preview": "npm run --workspace apps/ui preview",
+    "service:dev": "npm run --workspace apps/service dev"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.49.0",
+    "@typescript-eslint/parser": "^8.49.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-prettier": "^5.5.4",
+    "eslint-plugin-unused-imports": "^4.3.0",
+    "prettier": "^3.7.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

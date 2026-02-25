@@ -1,0 +1,55 @@
+# ==============================
+# Node (all packages)
+# ==============================
+**/node_modules/
+**/dist/
+**/build/
+**/.vite/
+**/*.log
+
+# ==============================
+# Environment files
+# ==============================
+**/.env
+**/.env.*
+!.env.example
+
+# ==============================
+# OS export (dev only)
+# ==============================
+os-export/
+os-export-temp/
+
+# Uncomment if OS snapshot should NOT be tracked
+# os/
+
+# ==============================
+# Packaged casino builds
+# ==============================
+/apps/ui/public/games/*
+!/apps/ui/public/games/.keep
+
+# ==============================
+# JetBrains
+# ==============================
+.idea/
+*.iml
+
+# ==============================
+# System junk
+# ==============================
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Runtime artifacts
+# ==============================
+tmp/
+*.pid
+
+# ==============================
+# SSH / Keys
+# ==============================
+*.pem
+*.key
+id_rsa*

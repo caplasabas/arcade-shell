@@ -1,0 +1,1 @@
+export { formatPeso } from './currency'
