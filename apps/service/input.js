@@ -29,6 +29,7 @@ const GPIOCHIP = 'gpiochip0'
 const HOPPER_PAY_PIN = 17
 
 const HOPPER_TIMEOUT_MS = 60000
+const HOPPER_NO_PULSE_TIMEOUT_MS = 3000
 
 const JOYSTICK_BUTTON_MAP = {
   0: 'SPIN',
@@ -89,13 +90,26 @@ let hopperTarget = 0
 let hopperDispensed = 0
 let hopperTimeout = null
 let hopperGpioProcess = null
+let hopperNoPulseTimeout = null
+let hopperLastPulseAt = 0
 
 let serverInstance = null
 
 let virtualP1 = null
 let virtualP2 = null
+const VIRTUAL_DEVICE_STAGGER_MS = 350
 
 let retroarchActive = false
+let retroarchProcess = null
+let retroarchStopping = false
+let lastExitTime = 0
+let retroarchLogFd = null
+
+const GAME_VT = '1'
+const UI_VT = '2'
+const RETROARCH_STOP_GRACE_MS = 3000
+const RETROARCH_LOG_PATH = '/tmp/retroarch.log'
+const RETROARCH_TERM_FALLBACK_MS = 1200
 // ============================
 // BOOT
 // ============================
@@ -249,22 +263,49 @@ function startHopper(amount) {
   hopperActive = true
   hopperTarget = amount
   hopperDispensed = 0
+  hopperLastPulseAt = Date.now()
 
   console.log('[HOPPER] START target=', amount)
 
   gpioOn(HOPPER_PAY_PIN)
+
+  if (hopperNoPulseTimeout) {
+    clearTimeout(hopperNoPulseTimeout)
+  }
+
+  hopperNoPulseTimeout = setTimeout(() => {
+    if (!hopperActive) return
+
+    const elapsed = Date.now() - hopperLastPulseAt
+    console.error(`[HOPPER] NO PULSE ${elapsed}ms — FORCED STOP`)
+    stopHopper()
+  }, HOPPER_NO_PULSE_TIMEOUT_MS)
 
   hopperTimeout = setTimeout(
     () => {
       console.error('[HOPPER] TIMEOUT — FORCED STOP')
       stopHopper()
     },
-    Math.min((amount / 20) * 1200, HARD_MAX_MS),
+    Math.min((amount / 20) * 1200, HOPPER_TIMEOUT_MS, HARD_MAX_MS),
   )
 }
 
 function handleWithdrawPulse() {
   if (!hopperActive) return
+
+  hopperLastPulseAt = Date.now()
+
+  if (hopperNoPulseTimeout) {
+    clearTimeout(hopperNoPulseTimeout)
+  }
+
+  hopperNoPulseTimeout = setTimeout(() => {
+    if (!hopperActive) return
+
+    const elapsed = Date.now() - hopperLastPulseAt
+    console.error(`[HOPPER] NO PULSE ${elapsed}ms — FORCED STOP`)
+    stopHopper()
+  }, HOPPER_NO_PULSE_TIMEOUT_MS)
 
   hopperDispensed += 20
 
@@ -289,6 +330,11 @@ function stopHopper() {
     clearTimeout(hopperTimeout)
     hopperTimeout = null
   }
+  if (hopperNoPulseTimeout) {
+    clearTimeout(hopperNoPulseTimeout)
+    hopperNoPulseTimeout = null
+  }
+  hopperLastPulseAt = 0
 
   console.log('[HOPPER] STOP dispensed=', hopperDispensed)
 
@@ -354,16 +400,33 @@ const dpadState = {
   P2: { up: false, down: false, left: false, right: false },
 }
 
-function startVirtualDevices() {
-  virtualP1 = spawn('uinput-helper', ['Arcade Virtual P1'], {
+function startVirtualDevice(name) {
+  const proc = spawn('uinput-helper', [name], {
     stdio: ['pipe', 'ignore', 'ignore'],
   })
 
-  virtualP2 = spawn('uinput-helper', ['Arcade Virtual P2'], {
-    stdio: ['pipe', 'ignore', 'ignore'],
+  proc.on('spawn', () => {
+    console.log(`[VIRTUAL] ${name} created (pid=${proc.pid})`)
   })
 
-  console.log('[VIRTUAL] P1 + P2 created')
+  proc.on('error', err => {
+    console.error(`[VIRTUAL] ${name} failed`, err.message)
+  })
+
+  return proc
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function startVirtualDevices() {
+  // Create in strict order to reduce race risk in /dev/input enumeration.
+  virtualP1 = startVirtualDevice('Arcade Virtual P1')
+  await sleep(VIRTUAL_DEVICE_STAGGER_MS)
+  virtualP2 = startVirtualDevice('Arcade Virtual P2')
+
+  console.log('[VIRTUAL] P1 then P2 initialized')
 }
 
 function mapIndexToKey(index) {
@@ -397,13 +460,24 @@ function sendVirtual(proc, type, code, value) {
 }
 
 function getJsIndexFromSymlink(path) {
-  const target = fs.readlinkSync(path) // returns "js2"
-  return parseInt(target.replace('js', ''), 10)
+  try {
+    const target = fs.readlinkSync(path)
+    const match = target.match(/(\d+)$/)
+    return match ? Number(match[1]) : null
+  } catch {
+    return null
+  }
 }
 
 const casinoIndex = getJsIndexFromSymlink('/dev/input/casino')
 const p1Index = getJsIndexFromSymlink('/dev/input/player1')
 const p2Index = getJsIndexFromSymlink('/dev/input/player2')
+
+console.log('[INPUT LINK]', {
+  casino: casinoIndex,
+  player1: p1Index,
+  player2: p2Index,
+})
 
 function startEventDevice(path, label) {
   if (!fs.existsSync(path)) {
@@ -551,15 +625,8 @@ function handleKey(source, index, value) {
     const casinoAction = JOYSTICK_BUTTON_MAP[index]
 
     if (casinoAction === 'MENU') {
-      if (retroarchActive && retroarchProcess) {
-        retroarchProcess.kill('SIGTERM')
-
-        setTimeout(() => {
-          if (retroarchProcess) {
-            console.warn('[FORCE KILL] RetroArch still alive')
-            retroarchProcess.kill('SIGKILL')
-          }
-        }, 3000)
+      if (retroarchActive) {
+        requestRetroarchStop('menu')
       } else {
         dispatch({ type: 'ACTION', action: 'MENU' })
       }
@@ -616,6 +683,89 @@ function routePlayerInput(source, index, value) {
   }
 }
 
+function switchToVT(vt, reason) {
+  const result = spawnSync('chvt', [vt], { encoding: 'utf8' })
+
+  if (result.status !== 0) {
+    console.error(`[VT] chvt ${vt} failed (${reason})`, result.stderr?.trim() || result.error?.message || '')
+    return false
+  }
+
+  return true
+}
+
+function killRetroarchProcess(signal, reason) {
+  if (!retroarchProcess) return
+
+  const pid = retroarchProcess.pid
+
+  try {
+    process.kill(-pid, signal)
+    console.log(`[RETROARCH] group ${signal} (${reason}) pid=${pid}`)
+    return
+  } catch {}
+
+  try {
+    retroarchProcess.kill(signal)
+    console.log(`[RETROARCH] child ${signal} (${reason}) pid=${pid}`)
+  } catch (err) {
+    console.error('[RETROARCH] kill failed', err.message)
+  }
+}
+
+function sendRetroarchSignal(signal, reason) {
+  if (!retroarchProcess) return
+  killRetroarchProcess(signal, reason)
+}
+
+function finalizeRetroarchExit(reason) {
+  const wasActive = retroarchActive
+  retroarchActive = false
+  retroarchStopping = false
+  retroarchProcess = null
+  lastExitTime = Date.now()
+  if (retroarchLogFd !== null) {
+    try {
+      fs.closeSync(retroarchLogFd)
+    } catch {}
+    retroarchLogFd = null
+  }
+
+  switchToVT(UI_VT, reason)
+
+  if (wasActive) {
+    dispatch({ type: 'GAME_EXITED' })
+  }
+}
+
+function requestRetroarchStop(reason) {
+  if (!retroarchActive) return
+
+  if (!retroarchProcess) {
+    console.warn('[RETROARCH] stop requested with no process')
+    finalizeRetroarchExit(`${reason}-missing-process`)
+    return
+  }
+
+  if (retroarchStopping) return
+  retroarchStopping = true
+
+  sendRetroarchSignal('SIGINT', `${reason}-graceful`)
+
+  setTimeout(() => {
+    if (!retroarchActive) return
+    sendRetroarchSignal('SIGTERM', `${reason}-term-fallback`)
+  }, RETROARCH_TERM_FALLBACK_MS)
+
+  setTimeout(() => {
+    if (!retroarchActive) return
+
+    console.warn('[RETROARCH] force-killing hung process')
+    killRetroarchProcess('SIGKILL', `${reason}-force`)
+    finalizeRetroarchExit(`${reason}-force-ui`)
+  }, RETROARCH_STOP_GRACE_MS)
+}
+
 // ============================
 // SHUTDOWN
 // ============================
@@ -640,10 +790,7 @@ async function shutdown() {
     player1?.close?.()
     player2?.close?.()
 
-    if (retroarchProcess) {
-      retroarchProcess.kill('SIGTERM')
-      retroarchProcess = null
-    }
+    requestRetroarchStop('shutdown')
 
     if (serverInstance) {
       await new Promise(resolve => serverInstance.close(resolve))
@@ -676,16 +823,13 @@ process.on('exit', () => {
 // ============================
 // START
 // ============================
-startVirtualDevices()
+await startVirtualDevices()
 
 startEventDevice('/dev/input/casino', 'CASINO')
 startEventDevice('/dev/input/player1', 'P1')
 startEventDevice('/dev/input/player2', 'P2')
 
 const PORT = 5174
-
-let retroarchProcess = null
-let lastExitTime = 0
 
 function readHardwareSerial() {
   try {
@@ -880,16 +1024,25 @@ const server = http.createServer((req, res) => {
         console.log('[LAUNCH] emulator')
 
         retroarchActive = true
+        retroarchStopping = false
 
         const ROM_PATH = path.resolve(__dirname, payload.rom)
+        retroarchLogFd = fs.openSync(RETROARCH_LOG_PATH, 'a')
 
-        spawnSync('chvt', ['1'])
+        switchToVT(GAME_VT, 'launch')
 
         retroarchProcess = spawn(
           'sudo',
           [
             '-u',
             'arcade1',
+            'env',
+            '-u',
+            'DISPLAY',
+            '-u',
+            'XAUTHORITY',
+            '-u',
+            'WAYLAND_DISPLAY',
             'retroarch',
             '--fullscreen',
             '--verbose',
@@ -898,25 +1051,21 @@ const server = http.createServer((req, res) => {
             ROM_PATH,
           ],
           {
-            stdio: 'ignore',
-            detached: false,
+            stdio: ['ignore', retroarchLogFd, retroarchLogFd],
+            detached: true,
           },
         )
 
-        retroarchProcess.on('exit', () => {
-          console.log('[PROCESS] RetroArch exited')
-          lastExitTime = Date.now()
-          spawnSync('sleep', ['0.4'])
+        retroarchProcess.unref()
 
-          // Force VT reset
-          spawnSync('chvt', ['2'])
+        retroarchProcess.on('error', err => {
+          console.error('[PROCESS] RetroArch spawn error', err.message)
+          finalizeRetroarchExit('spawn-error')
+        })
 
-          spawnSync('sleep', ['0.2'])
-
-          retroarchActive = false
-          retroarchProcess = null
-
-          dispatch({ type: 'GAME_EXITED' })
+        retroarchProcess.on('exit', (code, signal) => {
+          console.log(`[PROCESS] RetroArch exited code=${code} signal=${signal}`)
+          finalizeRetroarchExit('normal-exit')
         })
       }
 
