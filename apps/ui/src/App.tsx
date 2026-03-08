@@ -25,15 +25,22 @@ export type Game = {
   theme?: string
   emulator_core?: string
   rom_path?: string
+  package_url?: string
+  version?: number
 }
 
 const PAGE_SIZE = 12
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
+const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
 export default function App() {
   const [page, setPage] = useState(0)
   const [focus, setFocus] = useState(0)
   const [runningCasino, setRunningCasino] = useState(false)
+  const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
+  const [casinoPreparing, setCasinoPreparing] = useState(false)
+  const [casinoLaunchError, setCasinoLaunchError] = useState<string | null>(null)
+  const preparedCasinoVersionRef = useRef<Record<string, number>>({})
 
   const [deviceId, setDeviceId] = useState<string | null>(null)
   const deviceIdRef = useRef<string | null>(null)
@@ -45,6 +52,9 @@ export default function App() {
   const [now, setNow] = useState(new Date())
   const [wifiSignal, setWifiSignal] = useState<number | null>(null)
   const [wifiConnected, setWifiConnected] = useState<boolean>(false)
+  const [wifiSsid, setWifiSsid] = useState<string | null>(null)
+  const [ethernetIp, setEthernetIp] = useState<string | null>(null)
+  const [wifiIp, setWifiIp] = useState<string | null>(null)
 
   const [showWifiModal, setShowWifiModal] = useState(false)
 
@@ -64,6 +74,37 @@ export default function App() {
     }, 1000)
 
     return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    if (!casinoLaunchError) return
+    const timer = window.setTimeout(() => setCasinoLaunchError(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [casinoLaunchError])
+
+  useEffect(() => {
+    let stopped = false
+
+    const fetchNetworkInfo = async () => {
+      try {
+        const res = await fetch('http://localhost:5174/network-info')
+        if (!res.ok) return
+        const data = (await res.json()) as { ethernet?: string | null; wifi?: string | null }
+        if (stopped) return
+        setEthernetIp(data.ethernet ?? null)
+        setWifiIp(data.wifi ?? null)
+      } catch {
+        // ignore transient network info failures
+      }
+    }
+
+    fetchNetworkInfo()
+    const interval = window.setInterval(fetchNetworkInfo, 5000)
+
+    return () => {
+      stopped = true
+      window.clearInterval(interval)
+    }
   }, [])
 
   const networkStageRef = useRef(networkStage)
@@ -303,17 +344,44 @@ export default function App() {
     queueMetricEvent(id, 'win', amount)
   }
 
+  const STEP = 20
+  const MIN = 60
+  const getMaxSelectable = (balance: number) => {
+    return Math.floor(balance / STEP) * STEP
+  }
+  const isValidWithdrawAmount = (amount: number, balanceValue: number) => {
+    if (!Number.isFinite(amount)) return false
+    const max = getMaxSelectable(balanceValue)
+    return amount >= MIN && amount <= max && amount % STEP === 0
+  }
+  const maxSelectable = getMaxSelectable(balance)
+  const isWithdrawDisabled = maxSelectable < MIN
+
   const addWithdrawAmount = () => {
+    if (isWithdrawDisabled) return
     setWithdrawAmount(prev => {
-      return Math.min(prev + 20, balance)
+      const max = getMaxSelectable(balance)
+      return Math.min(prev + STEP, max)
     })
   }
 
   const minusWithdrawAmount = () => {
+    if (isWithdrawDisabled) return
     setWithdrawAmount(prev => {
-      return Math.max(60, prev - 20)
+      return Math.max(MIN, prev - STEP)
     })
   }
+
+  useEffect(() => {
+    if (!showWithdrawModal) return
+    if (isWithdrawDisabled) return
+    const max = getMaxSelectable(balance)
+    setWithdrawAmount(prev => {
+      const normalized = Math.floor(prev / STEP) * STEP
+      const withMin = Math.max(MIN, normalized)
+      return Math.min(withMin, max)
+    })
+  }, [showWithdrawModal, isWithdrawDisabled, balance])
 
   const shellStateRef = useRef({
     initialized: false,
@@ -321,6 +389,7 @@ export default function App() {
     withdrawAmount: 0,
     isWithdrawing: false,
     showWithdrawModal: false,
+    runningCasino: false,
   })
 
   useEffect(() => {
@@ -330,8 +399,9 @@ export default function App() {
       withdrawAmount,
       isWithdrawing,
       showWithdrawModal,
+      runningCasino,
     }
-  }, [initialized, balance, withdrawAmount, isWithdrawing, showWithdrawModal])
+  }, [initialized, balance, withdrawAmount, isWithdrawing, showWithdrawModal, runningCasino])
 
   const addWithdrawAmountRef = useRef(addWithdrawAmount)
   const minusWithdrawAmountRef = useRef(minusWithdrawAmount)
@@ -410,7 +480,7 @@ export default function App() {
         internetLossTimerRef.current = setTimeout(() => {
           setNetworkStage('no-internet')
           internetLossTimerRef.current = null
-        }, 3000)
+        }, INTERNET_LOSS_UI_DEBOUNCE_MS)
 
         return
       }
@@ -428,6 +498,7 @@ export default function App() {
       if (payload.type === 'WIFI_STATUS') {
         setWifiConnected(payload.connected)
         setWifiSignal(payload.signal)
+        setWifiSsid(payload.ssid ?? null)
         return
       }
 
@@ -491,8 +562,17 @@ export default function App() {
       // ----------------------------------
       // PLAYER INPUT
       // ----------------------------------
-      if (payload.type === 'PLAYER' && payload.player === 'P1') {
+      if (payload.type === 'PLAYER' && (payload.player === 'P1' || payload.player === 'CASINO')) {
         const button = payload.button
+
+        if (s.runningCasino) {
+          if (button === 6) {
+            setTimeout(() => {
+              handleExitGame()
+            }, 300)
+          }
+          return
+        }
 
         if (!s.showWithdrawModal && !s.isWithdrawing) {
           handleMenuInput(button)
@@ -506,8 +586,7 @@ export default function App() {
         // ----------------------------
       }
 
-      console.log('!runningCasino', !runningCasino)
-      if (!runningCasino) {
+      if (!s.runningCasino) {
         if (payload.type === 'COIN') {
           addBalance('coin', payload.credits)
           return
@@ -550,8 +629,9 @@ export default function App() {
 
           case 'WITHDRAW': {
             if (!s.showWithdrawModal) {
+              if (getMaxSelectable(s.balance) < MIN) break
               setShowWithdrawModalRef.current(true)
-            } else if (!s.isWithdrawing && s.balance >= s.withdrawAmount) {
+            } else if (!s.isWithdrawing && isValidWithdrawAmount(s.withdrawAmount, s.balance)) {
               fetch('http://localhost:5174', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -566,6 +646,11 @@ export default function App() {
             break
           }
         }
+      } else if (payload.type === 'ACTION' && payload.action === 'MENU') {
+        setTimeout(() => {
+          handleExitGame()
+        }, 300)
+        return
       }
     }
 
@@ -605,6 +690,7 @@ export default function App() {
     // if (!runningGame && !runningCasino) return
     setRunningGame(null)
     setRunningCasino(false)
+    setRunningCasinoSrc(null)
     exitGame()
   }
 
@@ -679,25 +765,87 @@ export default function App() {
     if (networkStageRef.current !== 'ok') return
 
     if (game.type === 'casino') {
+      if (!game.package_url) {
+        console.error('[LAUNCH] Missing package_url for casino game', { id: game.id })
+        setCasinoLaunchError('Game package unavailable.')
+        return
+      }
+
+      const requestedVersion = Number(game.version ?? 1)
+      let entry: string
+
+      setCasinoPreparing(true)
+      try {
+        const prepareRes = await fetch('http://localhost:5174/game-package/prepare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: game.id,
+            packageUrl: game.package_url,
+            version: requestedVersion,
+            force: false,
+          }),
+        })
+
+        if (!prepareRes.ok) {
+          const errorText = await prepareRes.text().catch(() => 'Unknown package prepare error')
+          throw new Error(`prepare failed (${prepareRes.status}): ${errorText}`)
+        }
+
+        const prepareData = await prepareRes.json()
+        if (!prepareData?.success || typeof prepareData.entry !== 'string') {
+          throw new Error(prepareData?.error ?? 'invalid prepare response')
+        }
+
+        entry = prepareData.entry
+
+        const prevVersion = preparedCasinoVersionRef.current[game.id]
+        preparedCasinoVersionRef.current[game.id] = requestedVersion
+
+        // Clean up old version in /dev/shm to avoid stale buildup.
+        if (Number.isFinite(prevVersion) && prevVersion !== requestedVersion) {
+          void fetch('http://localhost:5174/game-package/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: game.id,
+              version: prevVersion,
+            }),
+          })
+        }
+      } catch (err) {
+        console.error('[LAUNCH] Casino package prepare failed', {
+          id: game.id,
+          package_url: game.package_url,
+          version: requestedVersion,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        setCasinoLaunchError('Failed to load latest game package.')
+        return
+      } finally {
+        setCasinoPreparing(false)
+      }
+
       launchGame({
         id: game.id,
         type: 'casino',
-        entry: `/games/${game.id}/index.html`,
+        entry,
       })
       setRunningGame({ id: game.id, type: 'casino' })
 
+      setRunningCasinoSrc(entry)
       setRunningCasino(true)
     } else {
-      launchGame({
-        id: game.id,
-        type: 'arcade',
-        core: game.emulator_core,
-        rom: game.rom_path,
-      })
+      if (!game.emulator_core || !game.rom_path) {
+        console.error('[LAUNCH] Missing emulator_core or rom_path', {
+          id: game.id,
+          emulator_core: game.emulator_core,
+          rom_path: game.rom_path,
+        })
+        return
+      }
 
-      setRunningGame({ id: game.id, type: 'arcade', core: game.emulator_core, rom: game.rom_path })
-
-      fetch('http://localhost:5174', {
+      const response = await fetch('http://localhost:5174', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -707,6 +855,25 @@ export default function App() {
           rom: game.rom_path,
         }),
       })
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown launch error')
+        console.error('[LAUNCH] Arcade launch failed', {
+          id: game.id,
+          status: response.status,
+          error: errorText,
+        })
+        return
+      }
+
+      launchGame({
+        id: game.id,
+        type: 'arcade',
+        core: game.emulator_core,
+        rom: game.rom_path,
+      })
+
+      setRunningGame({ id: game.id, type: 'arcade', core: game.emulator_core, rom: game.rom_path })
     }
   }
 
@@ -761,7 +928,7 @@ export default function App() {
     )
   }
 
-  if ((!initialized && networkStage === 'ok') || networkStage === 'boot') {
+  if (((!initialized || loading) && networkStage === 'ok') || networkStage === 'boot') {
     return (
       <div className="boot-loading">
         <div className="boot-loading-content">
@@ -776,11 +943,19 @@ export default function App() {
     return (
       <>
         {networkStage === 'no-internet' && (
-          <NoInternetModal onConnect={() => setNetworkStage('wifi-form')} />
+          <NoInternetModal
+            onConnect={() => setNetworkStage('wifi-form')}
+            wifiConnected={wifiConnected}
+            currentSsid={wifiSsid}
+          />
         )}
 
         {networkStage === 'wifi-form' && (
-          <WifiSetupModal onConnected={() => setNetworkStage('ok')} />
+          <WifiSetupModal
+            onConnected={() => setNetworkStage('ok')}
+            wifiConnected={wifiConnected}
+            currentSsid={wifiSsid}
+          />
         )}
       </>
     )
@@ -788,6 +963,33 @@ export default function App() {
 
   return (
     <div>
+      {casinoPreparing && (
+        <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99998 }}>
+          <div className="boot-loading-content">
+            <div className="boot-spinner" />
+            <div className="boot-text">Loading Game Package…</div>
+          </div>
+        </div>
+      )}
+      {casinoLaunchError && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 20,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 100000,
+            background: 'rgba(0,0,0,0.85)',
+            border: '1px solid #ff5757',
+            color: '#fff',
+            padding: '10px 14px',
+            borderRadius: 6,
+            fontSize: 14,
+          }}
+        >
+          {casinoLaunchError}
+        </div>
+      )}
       {showWithdrawModal && (
         <WithdrawModal
           withdrawAmount={withdrawAmount}
@@ -797,6 +999,7 @@ export default function App() {
           onMinusAmount={minusWithdrawAmount}
           onCancel={() => setShowWithdrawModal(false)}
           onConfirm={() => {
+            if (!isValidWithdrawAmount(withdrawAmount, balance)) return
             fetch('http://localhost:5174', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -813,36 +1016,46 @@ export default function App() {
         <div className="scene-bg" style={{ backgroundImage: `url(${selectedGame.art})` }} />
       )}
 
-      <div className="top-status-bar">
-        <div>{formatDateTime(now)}</div>
+      {!runningCasino && (
+        <div className="top-status-bar">
+          <div>{formatDateTime(now)}</div>
 
-        <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
-      </div>
-
-      <GameGrid games={pageGames} focusedIndex={focus} page={page} />
-
-      <div className="overlay-hud">
-        <div className="balance-display">
-          Balance <span className="balance-amount">{formatPeso(balance ?? 0)}</span>
+          <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
         </div>
+      )}
 
-        <div className="device-info">
-          <label className="device-label">
-            Device:<span>{deviceId}</span>{' '}
-          </label>
+      <GameGrid balance={balance} games={pageGames} focusedIndex={focus} page={page} />
+
+      {!runningCasino && (
+        <div className="overlay-hud">
+          <div className="balance-display">
+            Balance <span className="balance-amount">{formatPeso(balance ?? 0)}</span>
+          </div>
+
+          <div className="device-info">
+            <label className="device-label">
+              Device:<span>{deviceId}</span>{' '}
+            </label>
+            <label className="device-label">
+              IP:<span>{ethernetIp ? `eth0 ${ethernetIp}` : ''}</span>
+              <span>{ethernetIp && wifiIp ? ' | ' : ''}</span>
+              <span>{wifiIp ? `wlan0 ${wifiIp}` : ''}</span>
+              <span>{!ethernetIp && !wifiIp ? 'N/A' : ''}</span>
+            </label>
+          </div>
         </div>
-      </div>
+      )}
       {runningCasino && (
         <div
           style={{
             position: 'fixed',
             inset: 0,
             background: 'black',
-            zIndex: 9999,
+            zIndex: 99999,
           }}
         >
           <iframe
-            src="/games/ultraace/index.html"
+            src={runningCasinoSrc ?? 'about:blank'}
             style={{
               width: '100%',
               height: '100%',

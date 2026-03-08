@@ -2,9 +2,11 @@ import { useEffect, useRef } from 'react'
 
 type Props = {
   onConnect: () => void
+  currentSsid?: string | null
+  wifiConnected?: boolean
 }
 
-export function NoInternetModal({ onConnect }: Props) {
+export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props) {
   const connectButtonRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
@@ -12,7 +14,7 @@ export function NoInternetModal({ onConnect }: Props) {
 
     const onArcadeInput = (event: Event) => {
       const customEvent = event as CustomEvent<{ button?: string | number }>
-      if (customEvent.detail?.button === 0) {
+      if (customEvent.detail?.button === 1) {
         onConnect()
       }
     }
@@ -35,11 +37,17 @@ export function NoInternetModal({ onConnect }: Props) {
         </div>
 
         <div className="modal-body">
+          {wifiConnected && currentSsid && (
+            <div className="modal-network-status">
+              Connected to <strong>{currentSsid}</strong>, but no internet access.
+            </div>
+          )}
+
           <div className="modal-row">
             <span>This arcade machine requires an active internet connection to operate.</span>
           </div>
 
-          <div className="modal-row">
+          <div className="modal-row connect-wifi-text">
             <strong>Please connect to WiFi to continue.</strong>
           </div>
         </div>

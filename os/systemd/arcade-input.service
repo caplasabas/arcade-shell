@@ -12,12 +12,17 @@ WorkingDirectory=/home/arcade1/arcade/apps/service
 
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/arcade1/.Xauthority
+Environment=GAME_PACKAGE_KEY_HEX=e93e36263af461dd686403aa98b20a1e084818359af81258fdb9b17828940620
+Environment=ARCADE_RUNTIME_GAMES_DIR=/dev/shm/arcade-games
+Environment=RETROARCH_TTY_MODE=1
+Environment=ARCADE_UI_VT=2
+Environment=ARCADE_GAME_VT=1
+Environment=RETROARCH_PRIMARY_INPUT=P1
+Environment=CASINO_MENU_EXITS_RETROARCH=1
 
 ExecStart=/usr/bin/node input.js
-
 Restart=always
 RestartSec=3
-
 StandardOutput=journal
 StandardError=journal
 

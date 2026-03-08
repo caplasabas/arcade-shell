@@ -1,7 +1,7 @@
 [Unit]
 Description=Arcade Xorg + Chromium Kiosk
 After=arcade-input.service systemd-user-sessions.service arcade-splash.service
-Requires=arcade-input.service arcade-splash.service
+Wants=arcade-input.service arcade-splash.service
 
 [Service]
 User=arcade1

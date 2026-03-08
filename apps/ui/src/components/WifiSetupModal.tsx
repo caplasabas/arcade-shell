@@ -7,15 +7,26 @@ type Network = {
 
 type VirtualKey = {
   label: string
-  action: 'char' | 'space' | 'backspace' | 'clear' | 'done'
+  action:
+    | 'char'
+    | 'space'
+    | 'backspace'
+    | 'clear'
+    | 'done'
+    | 'shift'
+    | 'symbols'
+    | 'letters'
+    | 'toggle-password'
   value?: string
 }
 
 type Props = {
   onConnected: () => void
+  currentSsid?: string | null
+  wifiConnected?: boolean
 }
 
-const KEYBOARD_LAYOUT: VirtualKey[][] = [
+const LETTERS_LAYOUT: VirtualKey[][] = [
   [
     { label: '1', action: 'char', value: '1' },
     { label: '2', action: 'char', value: '2' },
@@ -61,14 +72,76 @@ const KEYBOARD_LAYOUT: VirtualKey[][] = [
     { label: 'M', action: 'char', value: 'm' },
   ],
   [
+    { label: 'SHIFT', action: 'shift' },
+    { label: 'SYM', action: 'symbols' },
     { label: 'SPACE', action: 'space' },
     { label: 'BKSP', action: 'backspace' },
+    { label: 'SHOW', action: 'toggle-password' },
     { label: 'CLEAR', action: 'clear' },
     { label: 'DONE', action: 'done' },
   ],
 ]
 
-export function WifiSetupModal({ onConnected }: Props) {
+const SYMBOLS_LAYOUT: VirtualKey[][] = [
+  [
+    { label: '1', action: 'char', value: '1' },
+    { label: '2', action: 'char', value: '2' },
+    { label: '3', action: 'char', value: '3' },
+    { label: '4', action: 'char', value: '4' },
+    { label: '5', action: 'char', value: '5' },
+    { label: '6', action: 'char', value: '6' },
+    { label: '7', action: 'char', value: '7' },
+    { label: '8', action: 'char', value: '8' },
+    { label: '9', action: 'char', value: '9' },
+    { label: '0', action: 'char', value: '0' },
+  ],
+  [
+    { label: '!', action: 'char', value: '!' },
+    { label: '@', action: 'char', value: '@' },
+    { label: '#', action: 'char', value: '#' },
+    { label: '$', action: 'char', value: '$' },
+    { label: '%', action: 'char', value: '%' },
+    { label: '^', action: 'char', value: '^' },
+    { label: '&', action: 'char', value: '&' },
+    { label: '*', action: 'char', value: '*' },
+    { label: '(', action: 'char', value: '(' },
+    { label: ')', action: 'char', value: ')' },
+  ],
+  [
+    { label: '-', action: 'char', value: '-' },
+    { label: '_', action: 'char', value: '_' },
+    { label: '=', action: 'char', value: '=' },
+    { label: '+', action: 'char', value: '+' },
+    { label: '[', action: 'char', value: '[' },
+    { label: ']', action: 'char', value: ']' },
+    { label: '{', action: 'char', value: '{' },
+    { label: '}', action: 'char', value: '}' },
+    { label: '\\', action: 'char', value: '\\' },
+    { label: '|', action: 'char', value: '|' },
+  ],
+  [
+    { label: ';', action: 'char', value: ';' },
+    { label: ':', action: 'char', value: ':' },
+    { label: "'", action: 'char', value: "'" },
+    { label: '"', action: 'char', value: '"' },
+    { label: ',', action: 'char', value: ',' },
+    { label: '.', action: 'char', value: '.' },
+    { label: '/', action: 'char', value: '/' },
+    { label: '?', action: 'char', value: '?' },
+    { label: '`', action: 'char', value: '`' },
+    { label: '~', action: 'char', value: '~' },
+  ],
+  [
+    { label: 'ABC', action: 'letters' },
+    { label: 'SPACE', action: 'space' },
+    { label: 'BKSP', action: 'backspace' },
+    { label: 'SHOW', action: 'toggle-password' },
+    { label: 'CLEAR', action: 'clear' },
+    { label: 'DONE', action: 'done' },
+  ],
+]
+
+export function WifiSetupModal({ onConnected, currentSsid, wifiConnected }: Props) {
   const [networks, setNetworks] = useState<Network[]>([])
   const [ssid, setSsid] = useState('')
   const [password, setPassword] = useState('')
@@ -82,6 +155,38 @@ export function WifiSetupModal({ onConnected }: Props) {
   const [keyboardVisible, setKeyboardVisible] = useState(false)
   const [keyboardRow, setKeyboardRow] = useState(0)
   const [keyboardCol, setKeyboardCol] = useState(0)
+  const [shiftEnabled, setShiftEnabled] = useState(false)
+  const [symbolsMode, setSymbolsMode] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+
+  const keyboardLayout = symbolsMode ? SYMBOLS_LAYOUT : LETTERS_LAYOUT
+
+  const uiKeyboardLayout = keyboardLayout.map(row =>
+    row.map(key => {
+      if (key.action === 'char' && key.value && shiftEnabled && !symbolsMode) {
+        return {
+          ...key,
+          label: key.value.toUpperCase(),
+        }
+      }
+
+      if (key.action === 'shift') {
+        return {
+          ...key,
+          label: shiftEnabled ? 'SHIFT ON' : 'SHIFT',
+        }
+      }
+
+      if (key.action === 'toggle-password') {
+        return {
+          ...key,
+          label: showPassword ? 'HIDE' : 'SHOW',
+        }
+      }
+
+      return key
+    }),
+  )
 
   const networkButtonRef = useRef<HTMLButtonElement | null>(null)
   const rescanButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -90,9 +195,12 @@ export function WifiSetupModal({ onConnected }: Props) {
 
   const getFocusOrder = useCallback(
     () =>
-      [networkButtonRef.current, rescanButtonRef.current, passwordInputRef.current, connectButtonRef.current].filter(
-        Boolean,
-      ) as HTMLElement[],
+      [
+        networkButtonRef.current,
+        rescanButtonRef.current,
+        passwordInputRef.current,
+        connectButtonRef.current,
+      ].filter(Boolean) as HTMLElement[],
     [],
   )
 
@@ -170,51 +278,82 @@ export function WifiSetupModal({ onConnected }: Props) {
     setLoading(false)
   }, [onConnected, password, ssid])
 
-  const applyVirtualKey = useCallback((key: VirtualKey) => {
-    if (key.action === 'char' && key.value) {
-      setPassword(prev => prev + key.value)
-      return
-    }
+  const applyVirtualKey = useCallback(
+    (key: VirtualKey) => {
+      if (key.action === 'char' && key.value) {
+        const nextValue = shiftEnabled && !symbolsMode ? key.value.toUpperCase() : key.value
+        setPassword(prev => prev + nextValue)
+        return
+      }
 
-    if (key.action === 'space') {
-      setPassword(prev => prev + ' ')
-      return
-    }
+      if (key.action === 'space') {
+        setPassword(prev => prev + ' ')
+        return
+      }
 
-    if (key.action === 'backspace') {
-      setPassword(prev => prev.slice(0, -1))
-      return
-    }
+      if (key.action === 'backspace') {
+        setPassword(prev => prev.slice(0, -1))
+        return
+      }
 
-    if (key.action === 'clear') {
-      setPassword('')
-      return
-    }
+      if (key.action === 'clear') {
+        setPassword('')
+        return
+      }
 
-    if (key.action === 'done') {
-      setKeyboardVisible(false)
-      passwordInputRef.current?.focus()
-    }
-  }, [])
+      if (key.action === 'done') {
+        setKeyboardVisible(false)
+        passwordInputRef.current?.focus()
+        return
+      }
 
-  const moveKeyboard = useCallback((rowDelta: number, colDelta: number) => {
-    setKeyboardRow(prevRow => {
-      const nextRow = Math.max(0, Math.min(KEYBOARD_LAYOUT.length - 1, prevRow + rowDelta))
+      if (key.action === 'shift') {
+        setShiftEnabled(prev => !prev)
+        return
+      }
 
-      setKeyboardCol(prevCol => {
-        const maxCol = KEYBOARD_LAYOUT[nextRow].length - 1
-        return Math.max(0, Math.min(maxCol, prevCol + colDelta))
+      if (key.action === 'symbols') {
+        setSymbolsMode(true)
+        setKeyboardRow(0)
+        setKeyboardCol(0)
+        return
+      }
+
+      if (key.action === 'letters') {
+        setSymbolsMode(false)
+        setKeyboardRow(0)
+        setKeyboardCol(0)
+        return
+      }
+
+      if (key.action === 'toggle-password') {
+        setShowPassword(prev => !prev)
+      }
+    },
+    [shiftEnabled, symbolsMode],
+  )
+
+  const moveKeyboard = useCallback(
+    (rowDelta: number, colDelta: number) => {
+      setKeyboardRow(prevRow => {
+        const nextRow = Math.max(0, Math.min(uiKeyboardLayout.length - 1, prevRow + rowDelta))
+
+        setKeyboardCol(prevCol => {
+          const maxCol = uiKeyboardLayout[nextRow].length - 1
+          return Math.max(0, Math.min(maxCol, prevCol + colDelta))
+        })
+
+        return nextRow
       })
-
-      return nextRow
-    })
-  }, [])
+    },
+    [uiKeyboardLayout],
+  )
 
   const confirmWithP1 = useCallback(() => {
     if (loading || scanning) return
 
     if (keyboardVisible) {
-      const key = KEYBOARD_LAYOUT[keyboardRow]?.[keyboardCol]
+      const key = uiKeyboardLayout[keyboardRow]?.[keyboardCol]
       if (key) applyVirtualKey(key)
       return
     }
@@ -258,6 +397,7 @@ export function WifiSetupModal({ onConnected }: Props) {
     pickerIndex,
     pickerOpen,
     scanning,
+    uiKeyboardLayout,
   ])
 
   useEffect(() => {
@@ -267,12 +407,12 @@ export function WifiSetupModal({ onConnected }: Props) {
 
       if (button === undefined || button === null) return
 
-      if (button === 0) {
+      if (button === 1) {
         confirmWithP1()
         return
       }
 
-      if (button === 1 && keyboardVisible) {
+      if (button === 3 && keyboardVisible) {
         setKeyboardVisible(false)
         passwordInputRef.current?.focus()
         return
@@ -348,6 +488,12 @@ export function WifiSetupModal({ onConnected }: Props) {
         </div>
 
         <div className="modal-body">
+          {wifiConnected && currentSsid && (
+            <div className="modal-network-status">
+              Connected to <strong>{currentSsid}</strong>, but no internet access.
+            </div>
+          )}
+
           <div className="modal-row">
             <span>Select Network</span>
           </div>
@@ -390,7 +536,9 @@ export function WifiSetupModal({ onConnected }: Props) {
 
           {pickerOpen && (
             <div className="modal-network-list" role="listbox" aria-label="Available WiFi networks">
-              {networks.length === 0 && <div className="modal-network-empty">No networks found</div>}
+              {networks.length === 0 && (
+                <div className="modal-network-empty">No networks found</div>
+              )}
 
               {networks.map((network, index) => {
                 const isActive = index === pickerIndex
@@ -419,7 +567,7 @@ export function WifiSetupModal({ onConnected }: Props) {
 
           <input
             ref={passwordInputRef}
-            type="password"
+            type={showPassword ? 'text' : 'password'}
             value={password}
             onChange={event => setPassword(event.target.value)}
             onFocus={() => setPickerOpen(false)}
@@ -427,7 +575,7 @@ export function WifiSetupModal({ onConnected }: Props) {
 
           {keyboardVisible && (
             <div className="virtual-keyboard" aria-label="Virtual keyboard">
-              {KEYBOARD_LAYOUT.map((row, rowIndex) => (
+              {uiKeyboardLayout.map((row, rowIndex) => (
                 <div key={rowIndex} className="virtual-keyboard-row">
                   {row.map((key, colIndex) => {
                     const isSelected = rowIndex === keyboardRow && colIndex === keyboardCol
@@ -443,7 +591,9 @@ export function WifiSetupModal({ onConnected }: Props) {
                         }}
                         onClick={() => applyVirtualKey(key)}
                       >
-                        {key.label}
+                        {key.action === 'char' && !shiftEnabled
+                          ? key.label.toLowerCase()
+                          : key.label}
                       </button>
                     )
                   })}
@@ -456,7 +606,12 @@ export function WifiSetupModal({ onConnected }: Props) {
         </div>
 
         <div className="modal-actions">
-          <button ref={connectButtonRef} className="modal-confirm" disabled={loading} onClick={connect}>
+          <button
+            ref={connectButtonRef}
+            className="modal-confirm"
+            disabled={loading}
+            onClick={connect}
+          >
             {loading ? 'Connecting…' : 'Connect'}
           </button>
         </div>

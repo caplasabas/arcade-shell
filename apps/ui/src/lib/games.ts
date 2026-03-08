@@ -2,21 +2,45 @@ import { supabase } from './supabase'
 
 export async function fetchCabinetGames(deviceId: string) {
   const { data, error } = await supabase
-    .from('cabinet_visible_games')
-    .select('*')
+    .from('cabinet_games')
+    .select(
+      `
+      device_id,
+      game_id,
+      games!inner(
+        id,
+        name,
+        type,
+        price,
+        box_art_url,
+        emulator_core,
+        rom_path,
+        package_url,
+        version,
+        enabled
+      )
+    `,
+    )
     .eq('device_id', deviceId)
-    .order('name')
+    .eq('games.enabled', true)
 
   if (error) throw error
-  return (data ?? []).map(g => ({
-    id: g.id,
-    name: g.name,
-    type: g.type,
-    price: g.price,
-    art: g.box_art_url,
-    emulator_core: g.emulator_core,
-    rom_path: g.rom_path,
-  }))
+
+  return (data ?? [])
+    .map((row: any) => row.games)
+    .filter(Boolean)
+    .map((g: any) => ({
+      id: g.id,
+      name: g.name,
+      type: g.type,
+      price: g.price,
+      art: g.box_art_url,
+      emulator_core: g.emulator_core,
+      rom_path: g.rom_path,
+      package_url: g.package_url,
+      version: g.version,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 export function subscribeToGames(

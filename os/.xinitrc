@@ -1,23 +1,24 @@
+ cat  /home/arcade1/.xinitrc
 #!/bin/bash
-
 xsetroot -solid black
-
-# disable screen blanking
 xset s off
 xset -dpms
 xset s noblank
 
-unclutter &
+command -v unclutter >/dev/null 2>&1 && unclutter &
 
-# launch chromium
-chromium-browser \
-	--kiosk \
-	http://localhost:5174 \
-	--window-position=0,0 \
-	--window-size=1440,900 \
-	--start-fullscreen \
-	--no-first-run \
-	--disable-infobars \
-	--disable-session-crashed-bubble \
-	--disable-restore-session-state \
-	--disable-features=PaintHolding
+exec /usr/lib/chromium/chromium \
+  --kiosk \
+  http://localhost:5174 \
+  --window-position=0,0 \
+  --window-size=1440,900 \
+  --start-fullscreen \
+  --no-first-run \
+  --disable-infobars \
+  --disable-session-crashed-bubble \
+  --disable-restore-session-state \
+  --disable-features=PaintHolding
+  --disable-gpu \
+  --disable-gpu-rasterization \
+  --disable-gpu-compositing \
+  --ozone-platform=x11
