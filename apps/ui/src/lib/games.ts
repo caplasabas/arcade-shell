@@ -22,6 +22,7 @@ export async function fetchCabinetGames(deviceId: string) {
     `,
     )
     .eq('device_id', deviceId)
+    .eq('installed', true)
     .eq('games.enabled', true)
 
   if (error) throw error
