@@ -144,8 +144,8 @@ button:focus-visible {
     background-position: center;
     background-repeat: no-repeat;
 
-    filter: blur(4px) brightness(0.2);
-    transform: scale(1.22);
+    filter: brightness(0.35);
+    transform: scale(1.08);
     opacity: 0.95;
 
     transition: background-image 280ms ease,

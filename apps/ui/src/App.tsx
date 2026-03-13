@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { GameGrid } from './components/GameGrid'
 import { NoInternetModal } from './components/NoInternetModal'
@@ -11,6 +11,7 @@ import { WithdrawModal } from './components/WithdrawModal'
 
 import { ensureDeviceRegistered } from './lib/device'
 import { flushMetricEvents, queueMetricEvent } from './lib/metrics'
+import { supabase } from './lib/supabase'
 
 import { formatPeso } from './utils'
 
@@ -33,17 +34,48 @@ const PAGE_SIZE = 12
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
+
+type DeviceAdminCommandType = 'restart' | 'shutdown'
+
+type DeviceAdminCommandRow = {
+  id: number
+  device_id: string
+  command: DeviceAdminCommandType
+  status: string
+}
+
+function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
+  const id = Number(raw?.id ?? 0)
+  const device_id = String(raw?.device_id ?? '').trim()
+  const command = String(raw?.command ?? '').trim().toLowerCase()
+  const status = String(raw?.status ?? '').trim().toLowerCase()
+
+  if (!Number.isFinite(id) || id <= 0) return null
+  if (!device_id) return null
+  if (command !== 'restart' && command !== 'shutdown') return null
+
+  return {
+    id,
+    device_id,
+    command,
+    status,
+  }
+}
+
 export default function App() {
   const [page, setPage] = useState(0)
   const [focus, setFocus] = useState(0)
   const [runningCasino, setRunningCasino] = useState(false)
   const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
+  const casinoMenuExitAllowedRef = useRef(false)
   const [casinoPreparing, setCasinoPreparing] = useState(false)
   const [casinoLaunchError, setCasinoLaunchError] = useState<string | null>(null)
   const preparedCasinoVersionRef = useRef<Record<string, number>>({})
 
   const [deviceId, setDeviceId] = useState<string | null>(null)
   const deviceIdRef = useRef<string | null>(null)
+  const recoveryInFlightRef = useRef(false)
+  const adminCommandsInFlightRef = useRef<Set<number>>(new Set())
 
   const [networkStage, setNetworkStage] = useState<NetworkStage>('boot')
 
@@ -132,6 +164,140 @@ export default function App() {
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [isWithdrawing, setIsWithdrawing] = useState(false)
 
+  const isMissingDeviceRowError = (err: unknown) => {
+    const code = String((err as any)?.code ?? '')
+    const message = String((err as any)?.message ?? '')
+    const details = String((err as any)?.details ?? '')
+    return (
+      code === 'PGRST116' ||
+      message.toLowerCase().includes('0 rows') ||
+      details.toLowerCase().includes('0 rows')
+    )
+  }
+
+  const recoverDeviceState = useCallback(async (reason: string) => {
+    if (recoveryInFlightRef.current) return
+
+    recoveryInFlightRef.current = true
+    setLoading(true)
+    try {
+      console.log(`[RECOVERY] Auto re-init start (${reason})`)
+      const id = await ensureDeviceRegistered('Arcade Cabinet')
+      deviceIdRef.current = id
+      setDeviceId(current => (current === id ? current : id))
+
+      const [nextBalance, nextGames] = await Promise.all([
+        fetchDeviceBalance(id).catch(() => 0),
+        fetchCabinetGames(id).catch(() => [] as Game[]),
+      ])
+
+      setBalance(nextBalance)
+      setGames(nextGames)
+      setInitialized(true)
+      setNetworkStage('ok')
+
+      const current = runningGameRef.current
+      if (current && !nextGames.find(g => g.id === current.id)) {
+        handleExitGame()
+      }
+
+      setFocus(prev => {
+        if (prev >= nextGames.length) {
+          return Math.max(0, nextGames.length - 1)
+        }
+        return prev
+      })
+
+      console.log(`[RECOVERY] Auto re-init complete (${reason})`)
+    } catch (err) {
+      console.error(`[RECOVERY] Auto re-init failed (${reason})`, err)
+    } finally {
+      setLoading(false)
+      recoveryInFlightRef.current = false
+    }
+  }, [])
+
+  const executeLocalPowerCommand = useCallback(async (command: DeviceAdminCommandType) => {
+    const endpoint = command === 'restart' ? '/system/restart' : '/system/shutdown'
+    const response = await fetch(`http://localhost:5174${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'device_admin_commands',
+        requestedAt: new Date().toISOString(),
+      }),
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(`Local ${command} failed (${response.status})${text ? `: ${text}` : ''}`)
+    }
+  }, [])
+
+  const processAdminCommand = useCallback(
+    async (command: DeviceAdminCommandRow) => {
+      if (adminCommandsInFlightRef.current.has(command.id)) return
+      adminCommandsInFlightRef.current.add(command.id)
+
+      try {
+        const processingAt = new Date().toISOString()
+        const { data: claimed, error: claimError } = await supabase
+          .from('device_admin_commands')
+          .update({
+            status: 'processing',
+            processed_at: processingAt,
+            updated_at: processingAt,
+            error: null,
+          })
+          .eq('id', command.id)
+          .eq('status', 'queued')
+          .select('id,device_id,command,status')
+          .maybeSingle()
+
+        if (claimError) throw claimError
+        if (!claimed) return
+
+        const claimedCommand = normalizeDeviceAdminCommand(claimed)
+        if (!claimedCommand) return
+
+        await executeLocalPowerCommand(claimedCommand.command)
+
+        const completedAt = new Date().toISOString()
+        const { error: completeError } = await supabase
+          .from('device_admin_commands')
+          .update({
+            status: 'completed',
+            completed_at: completedAt,
+            updated_at: completedAt,
+            result: {
+              ok: true,
+              handled_by: deviceIdRef.current,
+              completed_at: completedAt,
+            },
+          })
+          .eq('id', claimedCommand.id)
+          .eq('status', 'processing')
+        if (completeError) throw completeError
+      } catch (err) {
+        console.error('[ADMIN CMD] processing failed', err)
+        const failedAt = new Date().toISOString()
+        const failError = String((err as any)?.message ?? err ?? 'Unknown error')
+        await supabase
+          .from('device_admin_commands')
+          .update({
+            status: 'failed',
+            completed_at: failedAt,
+            updated_at: failedAt,
+            error: failError,
+          })
+          .eq('id', command.id)
+          .eq('status', 'processing')
+      } finally {
+        adminCommandsInFlightRef.current.delete(command.id)
+      }
+    },
+    [executeLocalPowerCommand],
+  )
+
   useEffect(() => {
     if (networkStage !== 'ok') return
     if (initialized) return
@@ -140,13 +306,22 @@ export default function App() {
     let cancelled = false
 
     async function init() {
+      setLoading(true)
       try {
         const id = await ensureDeviceRegistered('Arcade Cabinet')
         if (cancelled) return
 
         setDeviceId(id)
 
-        const initialBalance = await fetchDeviceBalance(id)
+        let initialBalance: number
+        try {
+          initialBalance = await fetchDeviceBalance(id)
+        } catch (err) {
+          if (!isMissingDeviceRowError(err)) throw err
+          // RESET may have removed the row while app stayed mounted; recreate and retry.
+          await ensureDeviceRegistered('Arcade Cabinet')
+          initialBalance = await fetchDeviceBalance(id)
+        }
         if (cancelled) return
 
         setBalance(initialBalance)
@@ -161,6 +336,10 @@ export default function App() {
 
         // If backend unreachable, push back to offline state
         setNetworkStage('no-internet')
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
       }
     }
 
@@ -183,7 +362,11 @@ export default function App() {
     // 1️⃣ Hard refresh balance
     fetchDeviceBalance(deviceId)
       .then(setBalance)
-      .catch(() => {})
+      .catch(err => {
+        if (isMissingDeviceRowError(err)) {
+          void recoverDeviceState('network-recovery-missing-device')
+        }
+      })
 
     // 2️⃣ Hard refresh games
     fetchCabinetGames(deviceId)
@@ -269,8 +452,11 @@ export default function App() {
           }
           return prev
         })
-      } catch {
-        // Ignore transient fetch issues; network state handler already controls offline mode.
+      } catch (err) {
+        // Device reset can remove row while UI is still running; self-heal without manual restart.
+        if (isMissingDeviceRowError(err)) {
+          void recoverDeviceState('hard-sync-missing-device')
+        }
       } finally {
         inFlight = false
       }
@@ -293,7 +479,7 @@ export default function App() {
       if (document.visibilityState === 'visible') {
         hardSync()
       }
-    }, 15000)
+    }, 5000)
 
     hardSync()
 
@@ -304,7 +490,87 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisibility)
       window.clearInterval(interval)
     }
-  }, [deviceId, initialized, networkStage])
+  }, [deviceId, initialized, networkStage, recoverDeviceState])
+
+  useEffect(() => {
+    if (!deviceId) return
+    if (!initialized) return
+
+    const channel = supabase
+      .channel(`device-reset-watch-${deviceId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'DELETE',
+          schema: 'public',
+          table: 'devices',
+          filter: `device_id=eq.${deviceId}`,
+        },
+        () => {
+          void recoverDeviceState('device-delete-realtime')
+        },
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [deviceId, initialized, recoverDeviceState])
+
+  useEffect(() => {
+    if (!deviceId) return
+    if (!initialized) return
+
+    let cancelled = false
+
+    const fetchQueuedCommands = async () => {
+      const { data, error } = await supabase
+        .from('device_admin_commands')
+        .select('id,device_id,command,status,requested_at')
+        .eq('device_id', deviceId)
+        .eq('status', 'queued')
+        .order('requested_at', { ascending: true })
+        .limit(10)
+
+      if (cancelled || error) return
+
+      for (const raw of data ?? []) {
+        const command = normalizeDeviceAdminCommand(raw)
+        if (!command) continue
+        void processAdminCommand(command)
+      }
+    }
+
+    void fetchQueuedCommands()
+
+    const channel = supabase
+      .channel(`device-admin-commands-${deviceId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'device_admin_commands',
+          filter: `device_id=eq.${deviceId}`,
+        },
+        payload => {
+          const command = normalizeDeviceAdminCommand(payload.new)
+          if (!command || command.status !== 'queued') return
+          void processAdminCommand(command)
+        },
+      )
+      .subscribe()
+
+    const poll = window.setInterval(() => {
+      void fetchQueuedCommands()
+    }, 3000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(poll)
+      void supabase.removeChannel(channel)
+    }
+  }, [deviceId, initialized, processAdminCommand])
 
   const addBalance = (source = 'coin', amount = 5) => {
     const id = deviceIdRef.current
@@ -403,6 +669,21 @@ export default function App() {
     }
   }, [initialized, balance, withdrawAmount, isWithdrawing, showWithdrawModal, runningCasino])
 
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const payload = event.data
+      if (!payload || typeof payload !== 'object') return
+
+      if (payload.type === 'ULTRAACE_MENU_EXIT_STATE') {
+        casinoMenuExitAllowedRef.current = Boolean(payload.canExit)
+        return
+      }
+    }
+
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
   const addWithdrawAmountRef = useRef(addWithdrawAmount)
   const minusWithdrawAmountRef = useRef(minusWithdrawAmount)
   const setShowWithdrawModalRef = useRef(setShowWithdrawModal)
@@ -469,8 +750,6 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    let exitHoldStart = 0
-
     window.__ARCADE_INPUT__ = payload => {
       const s = shellStateRef.current
 
@@ -525,7 +804,6 @@ export default function App() {
 
       if (networkStageRef.current !== 'ok') return
 
-      console.log('[MENU]', payload)
       if (!payload || !s.initialized) return
 
       if (payload.type === 'GAME_EXITED') {
@@ -566,11 +844,6 @@ export default function App() {
         const button = payload.button
 
         if (s.runningCasino) {
-          if (button === 6) {
-            setTimeout(() => {
-              handleExitGame()
-            }, 300)
-          }
           return
         }
 
@@ -647,6 +920,7 @@ export default function App() {
           }
         }
       } else if (payload.type === 'ACTION' && payload.action === 'MENU') {
+        if (!casinoMenuExitAllowedRef.current) return
         setTimeout(() => {
           handleExitGame()
         }, 300)
@@ -660,7 +934,6 @@ export default function App() {
   }, [])
 
   function handleMenuInput(button: any) {
-    console.log('HANDLE MENU INPUT', button)
     switch (button) {
       case 'UP':
         moveFocus(-COLS)
@@ -688,6 +961,7 @@ export default function App() {
 
   function handleExitGame() {
     // if (!runningGame && !runningCasino) return
+    casinoMenuExitAllowedRef.current = false
     setRunningGame(null)
     setRunningCasino(false)
     setRunningCasinoSrc(null)
@@ -699,8 +973,6 @@ export default function App() {
   const bgOffset = (focus % COLS) * 6
 
   function moveFocus(delta: number) {
-    console.log('MOVE FOCUS', delta)
-
     setFocus(prev => {
       const currentPage = pageRef.current
       const currentGames = gamesRef.current
@@ -933,7 +1205,7 @@ export default function App() {
       <div className="boot-loading">
         <div className="boot-loading-content">
           <div className="boot-spinner" />
-          <div className="boot-text">Initializing…</div>
+          <div className="boot-text">Initializing...</div>
         </div>
       </div>
     )
@@ -967,7 +1239,7 @@ export default function App() {
         <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99998 }}>
           <div className="boot-loading-content">
             <div className="boot-spinner" />
-            <div className="boot-text">Loading Game Package…</div>
+            <div className="boot-text">Loading Game Package...</div>
           </div>
         </div>
       )}
@@ -1061,7 +1333,7 @@ export default function App() {
               height: '100%',
               border: 'none',
             }}
-            allow="gamepad; fullscreen"
+            allow="autoplay; gamepad; fullscreen; encrypted-media"
           />
         </div>
       )}

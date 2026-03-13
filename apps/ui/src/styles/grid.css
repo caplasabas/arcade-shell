@@ -22,5 +22,5 @@
     gap: 2rem;
     /*padding: 32px;*/
 
-    scroll-behavior: smooth;
+    scroll-behavior: auto;
 }

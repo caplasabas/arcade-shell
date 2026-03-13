@@ -7,6 +7,9 @@ Wants=arcade-input.service arcade-splash.service
 User=arcade1
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/arcade1/.Xauthority
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 
 TTYPath=/dev/tty2
 StandardInput=tty
@@ -17,7 +20,6 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 
 ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp
-
 Restart=always
 RestartSec=2
 

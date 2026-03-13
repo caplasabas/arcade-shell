@@ -19,6 +19,7 @@ Environment=ARCADE_UI_VT=2
 Environment=ARCADE_GAME_VT=1
 Environment=RETROARCH_PRIMARY_INPUT=P1
 Environment=CASINO_MENU_EXITS_RETROARCH=1
+Environment=ARCADE_RESTART_UI_ON_GAME_EXIT=0
 
 ExecStart=/usr/bin/node input.js
 Restart=always

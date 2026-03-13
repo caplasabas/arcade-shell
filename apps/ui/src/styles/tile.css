@@ -13,7 +13,7 @@
     transition: transform 180ms cubic-bezier(.2, .8, .2, 1),
     box-shadow 180ms ease;
 
-    filter: grayscale(80%);
+    filter: none;
 }
 
 /*.tile.casino {*/
@@ -22,7 +22,7 @@
 /*}*/
 
 .tile.disabled {
-    filter: grayscale(0.85) brightness(1);
+    opacity: 0.65;
 }
 
 
@@ -31,19 +31,20 @@
 
     z-index: 10;
     opacity: 1;
-    filter: grayscale(0) brightness(1);
+    filter: none;
 }
 
 .tile.focused {
     border: 3px solid rgba(255, 170, 40, 1);
-    box-shadow: 0 6px 40px rgba(255, 211, 136, 0.45);
+    box-shadow: 0 6px 22px rgba(255, 211, 136, 0.35);
 }
 
 
 .tile.disabled.tile.focused {
     border: 3px solid rgba(255, 170, 40, 0.7);
     /*box-shadow: 0 6px 40px rgba(255, 211, 136, 0.45);*/
-    filter: grayscale(0.85) brightness(1);
+    opacity: 0.65;
+    filter: none;
 }
 
 
@@ -52,7 +53,7 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-    filter: Brightness(0.5) grayscale(65%);
+    filter: brightness(0.75);
 }
 
 /*.art.casino {*/
@@ -67,7 +68,7 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-    filter: Brightness(1)
+    filter: none;
 }
 
 .title-band {

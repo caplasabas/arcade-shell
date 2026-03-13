@@ -1,4 +1,3 @@
- cat  /home/arcade1/.xinitrc
 #!/bin/bash
 xsetroot -solid black
 xset s off
@@ -17,8 +16,5 @@ exec /usr/lib/chromium/chromium \
   --disable-infobars \
   --disable-session-crashed-bubble \
   --disable-restore-session-state \
-  --disable-features=PaintHolding
-  --disable-gpu \
-  --disable-gpu-rasterization \
-  --disable-gpu-compositing \
-  --ozone-platform=x11
+  --disable-features=PaintHolding \
+  --autoplay-policy=no-user-gesture-required

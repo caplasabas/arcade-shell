@@ -131,6 +131,9 @@ let retroarchStopping = false
 let lastExitTime = 0
 let retroarchStartedAt = 0
 let retroarchLogFd = null
+let retroarchStopTermTimer = null
+let retroarchStopForceTimer = null
+let pendingUiFallbackTimer = null
 
 const GAME_VT = process.env.ARCADE_GAME_VT || '1'
 const UI_VT = process.env.ARCADE_UI_VT || '2'
@@ -138,6 +141,16 @@ const RETROARCH_STOP_GRACE_MS = 3000
 const RETROARCH_LOG_PATH = '/tmp/retroarch.log'
 const RETROARCH_TERM_FALLBACK_MS = 1200
 const RETROARCH_USE_TTY_MODE = process.env.RETROARCH_TTY_MODE === '1'
+const RETROARCH_RUN_USER = process.env.RETROARCH_RUN_USER || 'arcade1'
+const RETROARCH_RUN_UID = String(process.env.RETROARCH_RUN_UID || '1000')
+const RETROARCH_RUN_HOME = process.env.RETROARCH_RUN_HOME || `/home/${RETROARCH_RUN_USER}`
+const RETROARCH_RUNTIME_DIR =
+  process.env.RETROARCH_XDG_RUNTIME_DIR || `/run/user/${RETROARCH_RUN_UID}`
+const RETROARCH_DBUS_ADDRESS =
+  process.env.RETROARCH_DBUS_ADDRESS || `unix:path=${RETROARCH_RUNTIME_DIR}/bus`
+const RETROARCH_PULSE_SERVER =
+  process.env.RETROARCH_PULSE_SERVER || `unix:${RETROARCH_RUNTIME_DIR}/pulse/native`
+const RETROARCH_USE_DBUS_RUN_SESSION = process.env.RETROARCH_USE_DBUS_RUN_SESSION === '1'
 const RETROARCH_PRIMARY_INPUT = String(process.env.RETROARCH_PRIMARY_INPUT || 'P1').toUpperCase()
 const CASINO_MENU_EXITS_RETROARCH = process.env.CASINO_MENU_EXITS_RETROARCH !== '0'
 
@@ -149,7 +162,9 @@ function parseNonNegativeMs(value, fallback) {
 
 const RETROARCH_EXIT_GUARD_MS = parseNonNegativeMs(process.env.RETROARCH_EXIT_GUARD_MS, 1500)
 const RETROARCH_CONFIG_PATH = process.env.RETROARCH_CONFIG_PATH || ''
-const RESTART_UI_ON_EXIT = process.env.ARCADE_RESTART_UI_ON_GAME_EXIT !== '0'
+const RESTART_UI_ON_EXIT = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.ARCADE_RESTART_UI_ON_GAME_EXIT || '').toLowerCase(),
+)
 const UI_RESTART_COOLDOWN_MS = parseNonNegativeMs(process.env.ARCADE_UI_RESTART_COOLDOWN_MS, 4000)
 const LIBRETRO_DIR_CANDIDATES = [
   process.env.RETROARCH_CORE_DIR,
@@ -556,10 +571,22 @@ function mapIndexToKey(index) {
       return BTN_TL
     case 5:
       return BTN_TR
+    // Support both legacy 6/7 and modern 8/9 select/start layouts.
     case 6:
+    case 8:
       return BTN_SELECT
     case 7:
+    case 9:
       return BTN_START
+    // Some encoders expose dpad as digital buttons.
+    case 10:
+      return BTN_DPAD_UP
+    case 11:
+      return BTN_DPAD_DOWN
+    case 12:
+      return BTN_DPAD_LEFT
+    case 13:
+      return BTN_DPAD_RIGHT
     default:
       return null
   }
@@ -897,14 +924,36 @@ function switchToVTWithRetry(vt, reason, attempts = 5, delayMs = 150) {
 function scheduleForceSwitchToUI(reason, delayMs = 900) {
   if (!RETROARCH_USE_TTY_MODE || !IS_PI) return
 
+  if (pendingUiFallbackTimer !== null) {
+    clearTimeout(pendingUiFallbackTimer)
+    pendingUiFallbackTimer = null
+  }
+
   const targetUiVT = getTargetUiVT()
-  const cmd = `sleep ${Math.max(0, Math.round(delayMs)) / 1000}; chvt ${targetUiVT}`
-  const proc = spawn('sh', ['-lc', cmd], {
-    detached: true,
-    stdio: 'ignore',
-  })
-  proc.unref()
+  const waitMs = Math.max(0, Math.round(delayMs))
+  pendingUiFallbackTimer = setTimeout(() => {
+    pendingUiFallbackTimer = null
+    switchToVTWithRetry(targetUiVT, `${reason}-timer`)
+    setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-timer-post`), 300)
+  }, waitMs)
   console.log(`[VT] scheduled fallback to ${targetUiVT} (${reason})`)
+}
+
+function clearScheduledForceSwitchToUI() {
+  if (pendingUiFallbackTimer === null) return
+  clearTimeout(pendingUiFallbackTimer)
+  pendingUiFallbackTimer = null
+}
+
+function clearRetroarchStopTimers() {
+  if (retroarchStopTermTimer !== null) {
+    clearTimeout(retroarchStopTermTimer)
+    retroarchStopTermTimer = null
+  }
+  if (retroarchStopForceTimer !== null) {
+    clearTimeout(retroarchStopForceTimer)
+    retroarchStopForceTimer = null
+  }
 }
 
 function maybeRestartUiAfterExit(reason) {
@@ -948,8 +997,11 @@ function sendRetroarchSignal(signal, reason) {
 }
 
 function finalizeRetroarchExit(reason) {
+  if (!retroarchActive && !retroarchProcess) return
+
   const wasActive = retroarchActive
   const targetUiVT = getTargetUiVT()
+  clearRetroarchStopTimers()
   retroarchActive = false
   retroarchStopping = false
   retroarchProcess = null
@@ -984,17 +1036,23 @@ function requestRetroarchStop(reason) {
 
   if (retroarchStopping) return
   retroarchStopping = true
+  clearRetroarchStopTimers()
+  const stopTargetPid = retroarchProcess.pid
 
   sendRetroarchSignal('SIGINT', `${reason}-graceful`)
   console.log(`[VT] waiting for RetroArch exit before returning to ${targetUiVT}`)
 
-  setTimeout(() => {
+  retroarchStopTermTimer = setTimeout(() => {
+    retroarchStopTermTimer = null
     if (!retroarchActive) return
+    if (!retroarchProcess || retroarchProcess.pid !== stopTargetPid) return
     sendRetroarchSignal('SIGTERM', `${reason}-term-fallback`)
   }, RETROARCH_TERM_FALLBACK_MS)
 
-  setTimeout(() => {
+  retroarchStopForceTimer = setTimeout(() => {
+    retroarchStopForceTimer = null
     if (!retroarchActive) return
+    if (!retroarchProcess || retroarchProcess.pid !== stopTargetPid) return
 
     console.warn('[RETROARCH] force-killing hung process')
     killRetroarchProcess('SIGKILL', `${reason}-force`)
@@ -1027,6 +1085,8 @@ async function shutdown() {
     player2?.close?.()
 
     requestRetroarchStop('shutdown')
+    clearRetroarchStopTimers()
+    clearScheduledForceSwitchToUI()
 
     if (serverInstance) {
       await new Promise(resolve => serverInstance.close(resolve))
@@ -1139,6 +1199,41 @@ function setJsonCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+}
+
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(payload))
+}
+
+function scheduleSystemPowerAction(action) {
+  const command = action === 'restart' ? 'reboot' : 'poweroff'
+  console.log(`[SYSTEM] ${command} requested`)
+
+  setTimeout(() => {
+    if (!IS_PI) {
+      console.log(`[SYSTEM] ${command} simulated (compat mode)`)
+      return
+    }
+
+    if (retroarchActive) {
+      requestRetroarchStop(`system-${command}`)
+    }
+
+    const primary = spawn('systemctl', [command], {
+      stdio: 'ignore',
+      detached: true,
+    })
+    primary.on('error', err => {
+      console.error(`[SYSTEM] systemctl ${command} failed, trying fallback`, err.message)
+      const fallback = spawn(command, [], {
+        stdio: 'ignore',
+        detached: true,
+      })
+      fallback.unref()
+    })
+    primary.unref()
+  }, 400)
 }
 
 function getPackageKey() {
@@ -1631,6 +1726,40 @@ const server = http.createServer((req, res) => {
     }
   }
 
+  if (req.method === 'POST' && req.url === '/system/restart') {
+    let body = ''
+    req.on('data', chunk => {
+      body += chunk
+    })
+    req.on('end', () => {
+      try {
+        if (body) JSON.parse(body)
+      } catch {
+        // Ignore invalid body for this endpoint.
+      }
+      sendJson(res, 200, { success: true, action: 'restart', scheduled: true })
+      scheduleSystemPowerAction('restart')
+    })
+    return
+  }
+
+  if (req.method === 'POST' && req.url === '/system/shutdown') {
+    let body = ''
+    req.on('data', chunk => {
+      body += chunk
+    })
+    req.on('end', () => {
+      try {
+        if (body) JSON.parse(body)
+      } catch {
+        // Ignore invalid body for this endpoint.
+      }
+      sendJson(res, 200, { success: true, action: 'shutdown', scheduled: true })
+      scheduleSystemPowerAction('shutdown')
+    })
+    return
+  }
+
   if (req.method !== 'POST') {
     res.writeHead(405)
     res.end('Method Not Allowed')
@@ -1663,10 +1792,10 @@ const server = http.createServer((req, res) => {
           return res.end('Already running')
         }
 
-        if (Date.now() - lastExitTime < 300) {
-          console.log('[LAUNCH] Ignored — cooldown')
-          return res.end('Cooling down')
-        }
+      if (Date.now() - lastExitTime < 300) {
+        console.log('[LAUNCH] Ignored — cooldown')
+        return res.end('Cooling down')
+      }
 
         if (!IS_PI) {
           console.log('[LAUNCH] compat-mode simulated arcade launch')
@@ -1716,6 +1845,7 @@ const server = http.createServer((req, res) => {
         })
 
         retroarchLogFd = fs.openSync(RETROARCH_LOG_PATH, 'a')
+        clearScheduledForceSwitchToUI()
 
         const activeVT = getActiveVT()
         if (activeVT) {
@@ -1725,25 +1855,20 @@ const server = http.createServer((req, res) => {
 
         switchToVT(GAME_VT, 'launch')
 
-        const command = ['-u', 'arcade1']
+        const command = ['-u', RETROARCH_RUN_USER, 'env']
         if (RETROARCH_USE_TTY_MODE) {
-          command.push('env', '-u', 'DISPLAY', '-u', 'XAUTHORITY', '-u', 'WAYLAND_DISPLAY')
-        } else {
-          command.push('env', 'DISPLAY=:0', 'XAUTHORITY=/home/arcade1/.Xauthority')
+          command.push('-u', 'DISPLAY', '-u', 'XAUTHORITY', '-u', 'WAYLAND_DISPLAY')
         }
-        if (RETROARCH_USE_TTY_MODE) {
-          command.push('dbus-run-session', '--', 'retroarch', '--fullscreen', '--verbose')
-        } else {
-          command.push(
-            'env',
-            'XDG_RUNTIME_DIR=/run/user/1000',
-            'dbus-run-session',
-            '--',
-            'retroarch',
-            '--fullscreen',
-            '--verbose',
-          )
+        command.push(
+          `XDG_RUNTIME_DIR=${RETROARCH_RUNTIME_DIR}`,
+          `DBUS_SESSION_BUS_ADDRESS=${RETROARCH_DBUS_ADDRESS}`,
+          `PULSE_SERVER=${RETROARCH_PULSE_SERVER}`,
+        )
+        if (!RETROARCH_USE_TTY_MODE) {
+          command.push('DISPLAY=:0', `XAUTHORITY=${RETROARCH_RUN_HOME}/.Xauthority`)
         }
+        if (RETROARCH_USE_DBUS_RUN_SESSION) command.push('dbus-run-session', '--')
+        command.push('retroarch', '--fullscreen', '--verbose')
 
         if (RETROARCH_CONFIG_PATH) {
           command.push('--config', RETROARCH_CONFIG_PATH)

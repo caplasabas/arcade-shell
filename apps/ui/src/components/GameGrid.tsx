@@ -23,7 +23,7 @@ export function GameGrid({ balance, games, focusedIndex, page }: Props) {
     tile.scrollIntoView({
       block: 'nearest',
       inline: 'nearest',
-      behavior: 'smooth',
+      behavior: 'auto',
     })
   }, [focusedIndex])
 
