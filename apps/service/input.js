@@ -12,6 +12,8 @@ import http from 'http'
 import { WebSocketServer } from 'ws'
 import { exec, spawn, spawnSync } from 'child_process'
 import { createDecipheriv, createHash } from 'crypto'
+import dgram from 'dgram'
+import net from 'net'
 import os from 'os'
 
 import fs from 'fs'
@@ -134,6 +136,7 @@ let retroarchLogFd = null
 let retroarchStopTermTimer = null
 let retroarchStopForceTimer = null
 let pendingUiFallbackTimer = null
+let retroarchExitConfirmUntil = 0
 
 const GAME_VT = process.env.ARCADE_GAME_VT || '1'
 const UI_VT = process.env.ARCADE_UI_VT || '2'
@@ -153,6 +156,10 @@ const RETROARCH_PULSE_SERVER =
 const RETROARCH_USE_DBUS_RUN_SESSION = process.env.RETROARCH_USE_DBUS_RUN_SESSION === '1'
 const RETROARCH_PRIMARY_INPUT = String(process.env.RETROARCH_PRIMARY_INPUT || 'P1').toUpperCase()
 const CASINO_MENU_EXITS_RETROARCH = process.env.CASINO_MENU_EXITS_RETROARCH !== '0'
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '')
+  .trim()
+  .replace(/\/+$/, '')
+const SUPABASE_SERVICE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
 
 function parseNonNegativeMs(value, fallback) {
   const parsed = Number(value)
@@ -161,6 +168,10 @@ function parseNonNegativeMs(value, fallback) {
 }
 
 const RETROARCH_EXIT_GUARD_MS = parseNonNegativeMs(process.env.RETROARCH_EXIT_GUARD_MS, 1500)
+const RETROARCH_EXIT_CONFIRM_WINDOW_MS = parseNonNegativeMs(
+  process.env.RETROARCH_EXIT_CONFIRM_WINDOW_MS,
+  2500,
+)
 const RETROARCH_CONFIG_PATH = process.env.RETROARCH_CONFIG_PATH || ''
 const RESTART_UI_ON_EXIT = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ARCADE_RESTART_UI_ON_GAME_EXIT || '').toLowerCase(),
@@ -178,9 +189,95 @@ const PS1_CORE_ALIASES = String(
   .split(',')
   .map(v => v.trim().toLowerCase().replace(/-/g, '_'))
   .filter(Boolean)
+const ARCADE_LIFE_PRICE_DEFAULT = (() => {
+  const parsed = Number(process.env.ARCADE_LIFE_PRICE_DEFAULT || 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10
+})()
+const ARCADE_LIFE_DEDUCT_MODE =
+  String(process.env.ARCADE_LIFE_DEDUCT_MODE || 'every_start').toLowerCase() === 'unlock_once'
+    ? 'unlock_once'
+    : 'every_start'
+const ARCADE_LIFE_DEDUCT_COOLDOWN_MS = parseNonNegativeMs(
+  process.env.ARCADE_LIFE_DEDUCT_COOLDOWN_MS,
+  500,
+)
+const ARCADE_LIFE_START_CONFIRM_WINDOW_MS = parseNonNegativeMs(
+  process.env.ARCADE_LIFE_START_CONFIRM_WINDOW_MS,
+  2500,
+)
+const ARCADE_LIFE_FAIL_OPEN = process.env.ARCADE_LIFE_FAIL_OPEN === '1'
+const ARCADE_RETRO_OSD_ENABLED = process.env.ARCADE_RETRO_OSD !== '0'
+const RETROARCH_NETCMD_HOST = process.env.RETROARCH_NETCMD_HOST || '127.0.0.1'
+const RETROARCH_NETCMD_PORT = Number(process.env.RETROARCH_NETCMD_PORT || 55355)
+const RETROARCH_OSD_COMMAND = String(process.env.RETROARCH_OSD_COMMAND || 'AUTO')
+  .trim()
+  .toUpperCase()
+const ARCADE_RETRO_OSD_COOLDOWN_MS = parseNonNegativeMs(
+  process.env.ARCADE_RETRO_OSD_COOLDOWN_MS,
+  750,
+)
+const ARCADE_RETRO_OSD_RETRY_INTERVAL_MS = parseNonNegativeMs(
+  process.env.ARCADE_RETRO_OSD_RETRY_INTERVAL_MS,
+  180,
+)
+const ARCADE_RETRO_OSD_RETRY_COUNT = (() => {
+  const parsed = Number(process.env.ARCADE_RETRO_OSD_RETRY_COUNT || 2)
+  if (!Number.isFinite(parsed)) return 2
+  return Math.max(1, Math.min(8, Math.round(parsed)))
+})()
+const ARCADE_RETRO_OSD_PROMPT_PERSIST = process.env.ARCADE_RETRO_OSD_PROMPT_PERSIST !== '0'
+const ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS = parseNonNegativeMs(
+  process.env.ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS,
+  1200,
+)
+const ARCADE_RETRO_OSD_PROMPT_BLINK = process.env.ARCADE_RETRO_OSD_PROMPT_BLINK === '1'
+const ARCADE_RETRO_OSD_STYLE = (() => {
+  const style = String(process.env.ARCADE_RETRO_OSD_STYLE || 'footer')
+    .toLowerCase()
+    .trim()
+  if (style === 'hud' || style === 'legacy' || style === 'footer') return style
+  return 'footer'
+})()
+const ARCADE_RETRO_OSD_LABEL = String(process.env.ARCADE_RETRO_OSD_LABEL || '')
+  .replace(/\s+/g, ' ')
+  .trim()
+const ARCADE_RETRO_OSD_SHOW_SESSION_STATS = process.env.ARCADE_RETRO_OSD_SHOW_SESSION_STATS !== '0'
+const ARCADE_LIFE_CONTINUE_SECONDS = (() => {
+  const parsed = Number(process.env.ARCADE_LIFE_CONTINUE_SECONDS || 0)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.max(0, Math.min(30, Math.round(parsed)))
+})()
+const ARCADE_LIFE_BALANCE_SYNC_INTERVAL_MS = parseNonNegativeMs(
+  process.env.ARCADE_LIFE_BALANCE_SYNC_INTERVAL_MS,
+  1000,
+)
+const ARCADE_LIFE_PURCHASE_BUTTON_INDEXES = (() => {
+  const raw = String(process.env.ARCADE_LIFE_PURCHASE_BUTTON_INDEXES || '8')
+  const parsed = raw
+    .split(',')
+    .map(v => Number(v.trim()))
+    .filter(v => Number.isInteger(v) && v >= 0 && v <= 31)
+  if (parsed.length > 0) return new Set(parsed)
+  return new Set([8])
+})()
+const ARCADE_LIFE_PURCHASE_LABEL =
+  String(process.env.ARCADE_LIFE_PURCHASE_LABEL || 'Buy')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+    .slice(0, 16) || 'Buy'
+const START_BUTTON_INDEXES = new Set([7, 9])
 
 let lastUiVT = UI_VT
 let lastUiRestartAt = 0
+let arcadeSession = null
+let lastArcadeOsdMessage = ''
+let lastArcadeOsdAt = 0
+const arcadeContinueCountdownTimers = { P1: null, P2: null }
+let arcadePromptLoopTimer = null
+let arcadePromptBlinkPhase = false
+let arcadeBalanceSyncTimer = null
+let arcadeBalanceSyncInFlight = false
 
 function getActiveVT() {
   if (!RETROARCH_USE_TTY_MODE) return null
@@ -211,8 +308,19 @@ VT Map      : ui=${UI_VT} game=${GAME_VT}
 Retro P1 In : ${RETROARCH_PRIMARY_INPUT}
 Casino Exit : ${CASINO_MENU_EXITS_RETROARCH ? 'enabled' : 'disabled'}
 Exit Guard  : ${RETROARCH_EXIT_GUARD_MS}ms
+Exit Confirm: ${RETROARCH_EXIT_CONFIRM_WINDOW_MS}ms
 RA Config   : ${RETROARCH_CONFIG_PATH || '(default)'}
+RA OSD Cmd  : ${ARCADE_RETRO_OSD_ENABLED ? RETROARCH_OSD_COMMAND : 'disabled'} (${ARCADE_RETRO_OSD_COOLDOWN_MS}ms)
+RA OSD Retry: ${ARCADE_RETRO_OSD_RETRY_COUNT}x/${ARCADE_RETRO_OSD_RETRY_INTERVAL_MS}ms
+RA OSD Prompt: ${ARCADE_RETRO_OSD_PROMPT_PERSIST ? `on/${ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS}ms` : 'off'} (${ARCADE_RETRO_OSD_PROMPT_BLINK ? 'blink' : 'steady'})
+RA OSD Style: ${ARCADE_RETRO_OSD_STYLE}${ARCADE_RETRO_OSD_STYLE === 'hud' ? ` (${ARCADE_RETRO_OSD_LABEL || 'HUD'})` : ''}
+Continue OSD: ${ARCADE_LIFE_CONTINUE_SECONDS > 0 ? `${ARCADE_LIFE_CONTINUE_SECONDS}s` : 'disabled'}
+Life Buy Btn : ${[...ARCADE_LIFE_PURCHASE_BUTTON_INDEXES].join(',')} (${ARCADE_LIFE_PURCHASE_LABEL})
+Life Bal Sync: ${hasSupabaseRpcConfig() ? `on/${ARCADE_LIFE_BALANCE_SYNC_INTERVAL_MS}ms` : 'off'}
 UI Restart  : ${RESTART_UI_ON_EXIT ? 'enabled' : 'disabled'} (${UI_RESTART_COOLDOWN_MS}ms)
+Arcade Life : mode=${ARCADE_LIFE_DEDUCT_MODE} default=₱${ARCADE_LIFE_PRICE_DEFAULT} failOpen=${ARCADE_LIFE_FAIL_OPEN ? 'yes' : 'no'}
+Start Confirm: ${ARCADE_LIFE_START_CONFIRM_WINDOW_MS}ms
+Supabase RPC: ${SUPABASE_URL ? 'configured' : 'missing'} / key=${SUPABASE_SERVICE_KEY ? 'set' : 'missing'}
 
 Ctrl+C to exit
 `)
@@ -279,6 +387,706 @@ async function dispatch(payload) {
   } catch (err) {
     console.error('[DISPATCH ERROR]', err.message)
   }
+}
+
+function hasSupabaseRpcConfig() {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY)
+}
+
+function getSupabaseHeaders() {
+  return {
+    apikey: SUPABASE_SERVICE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+    'Content-Type': 'application/json',
+  }
+}
+
+function toMoney(value, fallback = 0) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.max(0, Math.round(parsed * 100) / 100)
+}
+
+function isStartButton(index) {
+  return START_BUTTON_INDEXES.has(index)
+}
+
+function isLifePurchaseButton(index) {
+  return ARCADE_LIFE_PURCHASE_BUTTON_INDEXES.has(index)
+}
+
+function getArcadeLifePromptActionLabel() {
+  if (ARCADE_LIFE_PURCHASE_LABEL === 'START') return 'START'
+  return `START OR ${ARCADE_LIFE_PURCHASE_LABEL}`
+}
+
+function normalizeArcadePlayer(source) {
+  const mapped = resolveRetroInputSource(source)
+  if (mapped === 'P1' || mapped === 'P2') return mapped
+  return null
+}
+
+function sendRetroarchNetCommand(command) {
+  if (!ARCADE_RETRO_OSD_ENABLED) return
+  if (!retroarchActive) return
+  if (!Number.isFinite(RETROARCH_NETCMD_PORT) || RETROARCH_NETCMD_PORT <= 0) return
+
+  const clean = String(command || '').trim()
+  const message = `${clean}\n`
+  if (!message.trim()) return
+
+  const sendOnce = attempt => {
+    const udpSocket = dgram.createSocket('udp4')
+    const udpPayload = Buffer.from(message, 'utf8')
+    udpSocket.send(udpPayload, RETROARCH_NETCMD_PORT, RETROARCH_NETCMD_HOST, err => {
+      if (err) {
+        console.error('[RETROARCH OSD] UDP send failed', err.message)
+      }
+      udpSocket.close()
+    })
+
+    const tcpSocket = net.createConnection(
+      {
+        host: RETROARCH_NETCMD_HOST,
+        port: RETROARCH_NETCMD_PORT,
+      },
+      () => {
+        tcpSocket.write(message, () => tcpSocket.end())
+      },
+    )
+    tcpSocket.setTimeout(300)
+    tcpSocket.on('error', () => {
+      // UDP path may still succeed; keep this quiet.
+    })
+    tcpSocket.on('timeout', () => {
+      tcpSocket.destroy()
+    })
+    console.log(`[RETROARCH OSD] #${attempt}/${ARCADE_RETRO_OSD_RETRY_COUNT} ${clean}`)
+  }
+
+  for (let attempt = 1; attempt <= ARCADE_RETRO_OSD_RETRY_COUNT; attempt += 1) {
+    const delay = (attempt - 1) * ARCADE_RETRO_OSD_RETRY_INTERVAL_MS
+    if (delay <= 0) {
+      sendOnce(attempt)
+      continue
+    }
+    setTimeout(() => {
+      if (!retroarchActive) return
+      sendOnce(attempt)
+    }, delay)
+  }
+}
+
+function showArcadeOsdMessage(message, options = {}) {
+  if (RETROARCH_OSD_COMMAND === 'OFF' || RETROARCH_OSD_COMMAND === 'NONE') return
+
+  const allowBlank = options?.allowBlank === true
+  const bypassCooldown = options?.bypassCooldown === true
+  const normalized = String(message || '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120)
+  const text = allowBlank ? normalized : normalized.trim()
+  if (!text && !allowBlank) return
+
+  const messageKey = text || '__BLANK__'
+
+  const now = Date.now()
+  if (!bypassCooldown && messageKey === lastArcadeOsdMessage) {
+    if (now - lastArcadeOsdAt < ARCADE_RETRO_OSD_COOLDOWN_MS) return
+  }
+  lastArcadeOsdMessage = messageKey
+  lastArcadeOsdAt = now
+
+  const osdCommands = (() => {
+    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MESG', 'SHOW_MSG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG', 'SHOW_MESG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG', 'SHOW_MSG']
+    return [RETROARCH_OSD_COMMAND]
+  })()
+
+  const seen = new Set()
+  for (const osdCommand of osdCommands) {
+    if (seen.has(osdCommand)) continue
+    seen.add(osdCommand)
+    const command = text ? `${osdCommand} ${text}` : osdCommand
+    sendRetroarchNetCommand(command)
+  }
+}
+
+function formatArcadeBalanceForOsd(rawBalance) {
+  if (rawBalance === null || rawBalance === undefined) return '?'
+  return toMoney(rawBalance, 0).toFixed(2)
+}
+
+function composeArcadeOsdOverlay(message, balanceOverride = null, options = null) {
+  const base = String(message || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!arcadeSession?.active) return base
+
+  const p1Lives = Number(arcadeSession.playerLivesPurchased?.P1 || 0)
+  const p2Lives = Number(arcadeSession.playerLivesPurchased?.P2 || 0)
+  const rawBalance =
+    balanceOverride === null || balanceOverride === undefined
+      ? arcadeSession.lastKnownBalance
+      : balanceOverride
+  const balanceText = formatArcadeBalanceForOsd(rawBalance)
+  const balanceBanner = `Balance ₱${balanceText}`
+
+  if (ARCADE_RETRO_OSD_STYLE === 'footer') {
+    const parts = [balanceBanner]
+    if (base) parts.push(base)
+    const continueSeconds = Number(options?.continueSeconds)
+    if (Number.isFinite(continueSeconds) && continueSeconds >= 0) {
+      parts.push(`CONTINUE ${String(Math.round(continueSeconds)).padStart(2, '0')}`)
+    }
+    return parts.join(' | ')
+  }
+
+  if (ARCADE_RETRO_OSD_STYLE === 'hud') {
+    const hudParts = []
+    if (ARCADE_RETRO_OSD_LABEL) hudParts.push(ARCADE_RETRO_OSD_LABEL)
+    hudParts.push(balanceBanner)
+    hudParts.push(base)
+    if (ARCADE_RETRO_OSD_SHOW_SESSION_STATS) {
+      hudParts.push(`P1:${p1Lives}`, `P2:${p2Lives}`, `Balance:P${balanceText}`)
+    }
+    const continueSeconds = Number(options?.continueSeconds)
+    if (Number.isFinite(continueSeconds) && continueSeconds >= 0) {
+      hudParts.push(`CONTINUE:${String(Math.round(continueSeconds)).padStart(2, '0')}`)
+    }
+    return hudParts.join(' | ')
+  }
+
+  return `${base} | P1:${p1Lives} P2:${p2Lives} Balance:P${balanceText}`
+}
+
+function pulseVirtualKey(proc, keyCode, holdMs = 45) {
+  sendVirtual(proc, EV_KEY, keyCode, 1)
+  setTimeout(
+    () => {
+      sendVirtual(proc, EV_KEY, keyCode, 0)
+    },
+    Math.max(10, holdMs),
+  )
+}
+
+function getArcadeSessionPrice() {
+  if (!arcadeSession?.active) return ARCADE_LIFE_PRICE_DEFAULT
+  return toMoney(arcadeSession.pricePerLife, ARCADE_LIFE_PRICE_DEFAULT)
+}
+
+function clearArcadeContinueCountdown(player = null) {
+  const players =
+    player && arcadeContinueCountdownTimers[player] !== undefined
+      ? [player]
+      : Object.keys(arcadeContinueCountdownTimers)
+
+  for (const currentPlayer of players) {
+    const timer = arcadeContinueCountdownTimers[currentPlayer]
+    if (!timer) continue
+    clearTimeout(timer)
+    arcadeContinueCountdownTimers[currentPlayer] = null
+  }
+}
+
+function clearArcadePromptLoop() {
+  if (arcadePromptLoopTimer !== null) {
+    clearTimeout(arcadePromptLoopTimer)
+    arcadePromptLoopTimer = null
+  }
+  arcadePromptBlinkPhase = false
+}
+
+function buildArcadePromptMessage() {
+  if (!arcadeSession?.active) return ''
+
+  const lockedP1 = !arcadeSession.playerUnlocked?.P1
+  const lockedP2 = !arcadeSession.playerUnlocked?.P2
+
+  const waitingP1 = lockedP1 && !arcadeContinueCountdownTimers.P1
+  const waitingP2 = lockedP2 && !arcadeContinueCountdownTimers.P2
+
+  if (waitingP1 || waitingP2) {
+    const priceText = getArcadeSessionPrice().toFixed(2)
+    const actionLabel = getArcadeLifePromptActionLabel()
+    if (waitingP1 && waitingP2) {
+      return composeArcadeOsdOverlay(`PRESS ${actionLabel} TO PLAY (P${priceText}/CREDIT)`)
+    }
+    if (waitingP1) {
+      return composeArcadeOsdOverlay(`P1 PRESS ${actionLabel} (P${priceText})`)
+    }
+    return composeArcadeOsdOverlay(`P2 PRESS ${actionLabel} (P${priceText})`)
+  }
+
+  if (lockedP1 || lockedP2) {
+    const priceText = getArcadeSessionPrice().toFixed(2)
+    const actionLabel = getArcadeLifePromptActionLabel()
+    if (lockedP1 && lockedP2) {
+      return composeArcadeOsdOverlay(`LOCKED | PRESS ${actionLabel} (P${priceText}/CREDIT)`)
+    }
+    if (lockedP1) {
+      return composeArcadeOsdOverlay(`P1 LOCKED | PRESS ${actionLabel} (P${priceText})`)
+    }
+    return composeArcadeOsdOverlay(`P2 LOCKED | PRESS ${actionLabel} (P${priceText})`)
+  }
+
+  return composeArcadeOsdOverlay('P1 READY | P2 READY')
+}
+
+function scheduleArcadePromptLoop() {
+  clearArcadePromptLoop()
+  if (!ARCADE_RETRO_OSD_PROMPT_PERSIST) return
+
+  const tick = () => {
+    if (!arcadeSession?.active) {
+      clearArcadePromptLoop()
+      return
+    }
+
+    const promptMessage = buildArcadePromptMessage()
+    if (promptMessage) {
+      if (ARCADE_RETRO_OSD_PROMPT_BLINK) {
+        arcadePromptBlinkPhase = !arcadePromptBlinkPhase
+        if (arcadePromptBlinkPhase) {
+          showArcadeOsdMessage(promptMessage, { bypassCooldown: true })
+        } else {
+          // Best-effort clear frame for blinking.
+          showArcadeOsdMessage('', { allowBlank: true, bypassCooldown: true })
+        }
+      } else {
+        showArcadeOsdMessage(promptMessage, { bypassCooldown: true })
+      }
+    } else {
+      arcadePromptBlinkPhase = false
+    }
+
+    arcadePromptLoopTimer = setTimeout(tick, ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS)
+  }
+
+  tick()
+}
+
+function startArcadeContinueCountdown(player) {
+  if (!arcadeSession?.active) return
+  if (ARCADE_LIFE_CONTINUE_SECONDS <= 0) return
+  if (player !== 'P1' && player !== 'P2') return
+
+  clearArcadeContinueCountdown(player)
+
+  let remaining = ARCADE_LIFE_CONTINUE_SECONDS
+  const playerIndex = player.slice(1)
+
+  const tick = () => {
+    if (!arcadeSession?.active) {
+      clearArcadeContinueCountdown(player)
+      return
+    }
+    if (arcadeSession.playerUnlocked?.[player]) {
+      clearArcadeContinueCountdown(player)
+      return
+    }
+
+    const priceText = getArcadeSessionPrice().toFixed(2)
+    const actionLabel = getArcadeLifePromptActionLabel()
+    showArcadeOsdMessage(
+      composeArcadeOsdOverlay(`P${playerIndex} PRESS ${actionLabel} (P${priceText})`, null, {
+        continueSeconds: remaining,
+      }),
+    )
+
+    if (remaining <= 0) {
+      clearArcadeContinueCountdown(player)
+      return
+    }
+
+    remaining -= 1
+    arcadeContinueCountdownTimers[player] = setTimeout(tick, 1000)
+  }
+
+  tick()
+}
+
+function broadcastArcadeLifeState(status = 'state', extra = {}) {
+  if (!arcadeSession?.active) {
+    dispatch({
+      type: 'ARCADE_LIFE_STATE',
+      active: false,
+      status,
+      ...extra,
+    })
+    return
+  }
+
+  dispatch({
+    type: 'ARCADE_LIFE_STATE',
+    active: true,
+    status,
+    gameId: arcadeSession.gameId,
+    gameName: arcadeSession.gameName,
+    pricePerLife: arcadeSession.pricePerLife,
+    p1Unlocked: Boolean(arcadeSession.playerUnlocked?.P1),
+    p2Unlocked: Boolean(arcadeSession.playerUnlocked?.P2),
+    p1LivesPurchased: Number(arcadeSession.playerLivesPurchased?.P1 || 0),
+    p2LivesPurchased: Number(arcadeSession.playerLivesPurchased?.P2 || 0),
+    balance: arcadeSession.lastKnownBalance,
+    ...extra,
+  })
+}
+
+async function fetchDeviceBalanceSnapshot() {
+  if (!hasSupabaseRpcConfig()) return null
+
+  const url =
+    `${SUPABASE_URL}/rest/v1/devices?` +
+    `select=balance&device_id=eq.${encodeURIComponent(DEVICE_ID)}&limit=1`
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: getSupabaseHeaders(),
+    signal: AbortSignal.timeout(2500),
+  })
+  if (!response.ok) {
+    throw new Error(`balance fetch failed (${response.status})`)
+  }
+
+  const rows = await response.json()
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row) return null
+  if (row.balance === null || row.balance === undefined) return null
+  return toMoney(row.balance, 0)
+}
+
+function clearArcadeBalanceSyncLoop() {
+  if (arcadeBalanceSyncTimer !== null) {
+    clearTimeout(arcadeBalanceSyncTimer)
+    arcadeBalanceSyncTimer = null
+  }
+}
+
+async function syncArcadeSessionBalance(options = {}) {
+  if (!arcadeSession?.active) return
+  if (!hasSupabaseRpcConfig()) return
+  if (arcadeBalanceSyncInFlight) return
+
+  const forceBroadcast = options?.forceBroadcast === true
+  arcadeBalanceSyncInFlight = true
+  try {
+    const latestBalance = await fetchDeviceBalanceSnapshot()
+    if (!arcadeSession?.active) return
+    if (latestBalance === null || latestBalance === undefined) return
+
+    const previous = arcadeSession.lastKnownBalance
+    const changed = previous !== latestBalance
+    arcadeSession.lastKnownBalance = latestBalance
+    if (changed || forceBroadcast) {
+      broadcastArcadeLifeState('balance_sync', { balance: latestBalance })
+    }
+  } catch {
+    // Keep loop alive; transient Supabase/network failures are expected.
+  } finally {
+    arcadeBalanceSyncInFlight = false
+  }
+}
+
+function scheduleArcadeBalanceSyncLoop() {
+  clearArcadeBalanceSyncLoop()
+  if (!hasSupabaseRpcConfig()) return
+
+  const tick = async () => {
+    if (!arcadeSession?.active) {
+      clearArcadeBalanceSyncLoop()
+      return
+    }
+
+    await syncArcadeSessionBalance()
+    arcadeBalanceSyncTimer = setTimeout(tick, ARCADE_LIFE_BALANCE_SYNC_INTERVAL_MS)
+  }
+
+  tick()
+}
+
+function startArcadeLifeSession({ gameId, gameName, pricePerLife }) {
+  clearArcadeBalanceSyncLoop()
+  clearArcadePromptLoop()
+  clearArcadeContinueCountdown()
+  arcadeSession = {
+    active: true,
+    gameId: String(gameId || '').trim() || 'unknown',
+    gameName: String(gameName || '').trim() || String(gameId || '').trim() || 'Arcade Game',
+    pricePerLife: toMoney(pricePerLife, ARCADE_LIFE_PRICE_DEFAULT),
+    playerUnlocked: { P1: false, P2: false },
+    playerLivesPurchased: { P1: 0, P2: 0 },
+    purchaseInFlight: { P1: false, P2: false },
+    startConfirmUntil: { P1: 0, P2: 0 },
+    lastChargeAt: { P1: 0, P2: 0 },
+    lastKnownBalance: null,
+  }
+
+  const priceText = getArcadeSessionPrice().toFixed(2)
+  const actionLabel = getArcadeLifePromptActionLabel()
+  showArcadeOsdMessage(
+    composeArcadeOsdOverlay(`PRESS ${actionLabel} TO PLAY (P${priceText}/CREDIT)`),
+  )
+  broadcastArcadeLifeState('started')
+
+  // RetroArch netcmd can come up a bit after launch; resend the prompt once.
+  const sessionRef = arcadeSession
+  setTimeout(() => {
+    if (!arcadeSession?.active || arcadeSession !== sessionRef) return
+    if (arcadeSession.playerUnlocked.P1 || arcadeSession.playerUnlocked.P2) return
+    const promptPriceText = getArcadeSessionPrice().toFixed(2)
+    const promptActionLabel = getArcadeLifePromptActionLabel()
+    showArcadeOsdMessage(
+      composeArcadeOsdOverlay(`PRESS ${promptActionLabel} TO PLAY (P${promptPriceText}/CREDIT)`),
+    )
+  }, 2000)
+  scheduleArcadePromptLoop()
+  scheduleArcadeBalanceSyncLoop()
+  syncArcadeSessionBalance({ forceBroadcast: true })
+}
+
+function clearArcadeLifeSession(reason = 'ended') {
+  if (!arcadeSession?.active) return
+
+  const endedSession = arcadeSession
+  arcadeSession = null
+  clearArcadeBalanceSyncLoop()
+  clearArcadePromptLoop()
+  clearArcadeContinueCountdown()
+  dispatch({
+    type: 'ARCADE_LIFE_SESSION_ENDED',
+    status: reason,
+    gameId: endedSession.gameId,
+    gameName: endedSession.gameName,
+    p1LivesPurchased: Number(endedSession.playerLivesPurchased?.P1 || 0),
+    p2LivesPurchased: Number(endedSession.playerLivesPurchased?.P2 || 0),
+    balance: endedSession.lastKnownBalance,
+  })
+}
+
+async function fetchGameProfileForArcadeLife(gameId) {
+  if (!hasSupabaseRpcConfig()) return null
+
+  const safeId = String(gameId || '').trim()
+  if (!safeId) return null
+
+  const url =
+    `${SUPABASE_URL}/rest/v1/games?` +
+    `select=id,name,price,type,enabled&id=eq.${encodeURIComponent(safeId)}&type=eq.arcade&limit=1`
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: getSupabaseHeaders(),
+      signal: AbortSignal.timeout(2500),
+    })
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      console.error('[ARCADE LIFE] game profile fetch failed', response.status, text)
+      return null
+    }
+
+    const rows = await response.json()
+    const row = Array.isArray(rows) ? rows[0] : null
+    if (!row || row.enabled === false) return null
+
+    return {
+      gameId: row.id || safeId,
+      gameName: row.name || safeId,
+      pricePerLife: toMoney(row.price, ARCADE_LIFE_PRICE_DEFAULT),
+    }
+  } catch (err) {
+    console.error('[ARCADE LIFE] game profile fetch error', err?.message || err)
+    return null
+  }
+}
+
+async function consumeArcadeLifeCharge({ player, reason = 'start' }) {
+  const pricePerLife = getArcadeSessionPrice()
+  const gameId = arcadeSession?.gameId || 'unknown'
+
+  if (!hasSupabaseRpcConfig()) {
+    if (ARCADE_LIFE_FAIL_OPEN) {
+      return {
+        ok: true,
+        balance: arcadeSession?.lastKnownBalance ?? null,
+        chargedAmount: pricePerLife,
+        reason: 'fail_open_backend_missing',
+      }
+    }
+    return {
+      ok: false,
+      balance: arcadeSession?.lastKnownBalance ?? null,
+      chargedAmount: 0,
+      reason: 'payment_backend_missing',
+    }
+  }
+
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/consume_arcade_life`, {
+      method: 'POST',
+      headers: getSupabaseHeaders(),
+      signal: AbortSignal.timeout(3500),
+      body: JSON.stringify({
+        p_device_id: DEVICE_ID,
+        p_game_id: gameId,
+        p_player: player,
+        p_amount: pricePerLife,
+        p_reason: reason,
+        p_event_ts: new Date().toISOString(),
+        p_metadata: {
+          source: 'arcade-input-service',
+          mode: ARCADE_LIFE_DEDUCT_MODE,
+        },
+      }),
+    })
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      console.error('[ARCADE LIFE] rpc failed', response.status, text)
+      if (ARCADE_LIFE_FAIL_OPEN) {
+        return {
+          ok: true,
+          balance: arcadeSession?.lastKnownBalance ?? null,
+          chargedAmount: pricePerLife,
+          reason: 'fail_open_rpc_error',
+        }
+      }
+      return {
+        ok: false,
+        balance: arcadeSession?.lastKnownBalance ?? null,
+        chargedAmount: 0,
+        reason: 'payment_rpc_error',
+      }
+    }
+
+    const body = await response.json()
+    const row = Array.isArray(body) ? body[0] : body
+    const rowReason = String(row?.reason || '')
+      .toLowerCase()
+      .trim()
+    const chargedAmountRaw = toMoney(row?.charged_amount, 0)
+    const ok =
+      row?.ok === true ||
+      row?.ok === 1 ||
+      row?.ok === '1' ||
+      row?.ok === 't' ||
+      row?.ok === 'true' ||
+      rowReason === 'charged' ||
+      chargedAmountRaw > 0
+    const nextBalance =
+      row?.balance === null || row?.balance === undefined
+        ? (arcadeSession?.lastKnownBalance ?? null)
+        : toMoney(row.balance, 0)
+    return {
+      ok,
+      balance: nextBalance,
+      chargedAmount: chargedAmountRaw > 0 ? chargedAmountRaw : ok ? pricePerLife : 0,
+      reason: String(row?.reason || (ok ? 'charged' : 'insufficient_balance')),
+    }
+  } catch (err) {
+    console.error('[ARCADE LIFE] rpc error', err?.message || err)
+    if (ARCADE_LIFE_FAIL_OPEN) {
+      return {
+        ok: true,
+        balance: arcadeSession?.lastKnownBalance ?? null,
+        chargedAmount: pricePerLife,
+        reason: 'fail_open_rpc_exception',
+      }
+    }
+    return {
+      ok: false,
+      balance: arcadeSession?.lastKnownBalance ?? null,
+      chargedAmount: 0,
+      reason: 'payment_rpc_exception',
+    }
+  }
+}
+
+function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
+  if (!arcadeSession?.active) return
+  if (!player || !target) return
+  const sessionRef = arcadeSession
+  if (sessionRef.purchaseInFlight[player]) return
+
+  const now = Date.now()
+  const lastAt = Number(sessionRef.lastChargeAt[player] || 0)
+  if (now - lastAt < ARCADE_LIFE_DEDUCT_COOLDOWN_MS) return
+
+  if (ARCADE_LIFE_DEDUCT_MODE === 'unlock_once' && sessionRef.playerUnlocked[player]) {
+    pulseVirtualKey(target, keyCode)
+    return
+  }
+
+  sessionRef.lastChargeAt[player] = now
+  sessionRef.purchaseInFlight[player] = true
+
+  consumeArcadeLifeCharge({ player, reason })
+    .then(result => {
+      if (!arcadeSession?.active || arcadeSession !== sessionRef) return
+      sessionRef.purchaseInFlight[player] = false
+      sessionRef.lastKnownBalance = result.balance
+
+      if (result.ok) {
+        clearArcadeContinueCountdown(player)
+        sessionRef.playerUnlocked[player] = true
+        sessionRef.playerLivesPurchased[player] += 1
+
+        const priceText = getArcadeSessionPrice().toFixed(2)
+        const balanceText =
+          result.balance === null || result.balance === undefined
+            ? '?'
+            : toMoney(result.balance, 0).toFixed(2)
+
+        pulseVirtualKey(target, keyCode)
+        showArcadeOsdMessage(
+          composeArcadeOsdOverlay(
+            `P${player.slice(1)} ${ARCADE_LIFE_PURCHASE_LABEL} Ok -P${priceText} Balance P${balanceText}`,
+            result.balance,
+          ),
+        )
+        broadcastArcadeLifeState('charged', {
+          player,
+          chargedAmount: result.chargedAmount,
+          balance: result.balance,
+        })
+        return
+      }
+
+      const priceText = getArcadeSessionPrice().toFixed(2)
+      const balanceText =
+        result.balance === null || result.balance === undefined
+          ? '?'
+          : toMoney(result.balance, 0).toFixed(2)
+      showArcadeOsdMessage(
+        composeArcadeOsdOverlay(
+          `Insufficient Balance Needed P${priceText} Balance P${balanceText}`,
+          result.balance,
+        ),
+      )
+      if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
+        setTimeout(() => {
+          if (!arcadeSession?.active || arcadeSession !== sessionRef) return
+          if (sessionRef.playerUnlocked[player]) return
+          startArcadeContinueCountdown(player)
+        }, 1200)
+      }
+      broadcastArcadeLifeState('denied', {
+        player,
+        denyReason: result.reason,
+        balance: result.balance,
+      })
+    })
+    .catch(err => {
+      if (arcadeSession?.active && arcadeSession === sessionRef) {
+        sessionRef.purchaseInFlight[player] = false
+      }
+      console.error('[ARCADE LIFE] purchase error', err?.message || err)
+      showArcadeOsdMessage('Payment Error - TRY AGAIN')
+      broadcastArcadeLifeState('error', { player, denyReason: 'purchase_exception' })
+    })
 }
 
 // ============================
@@ -613,6 +1421,38 @@ function canAcceptRetroarchStop() {
   return Date.now() - retroarchStartedAt >= RETROARCH_EXIT_GUARD_MS
 }
 
+function clearRetroarchExitConfirm() {
+  retroarchExitConfirmUntil = 0
+}
+
+function handleRetroarchMenuExitIntent() {
+  if (!CASINO_MENU_EXITS_RETROARCH) return false
+
+  if (!canAcceptRetroarchStop()) {
+    console.log('[RETROARCH] MENU ignored by guard', {
+      elapsedMs: retroarchStartedAt ? Date.now() - retroarchStartedAt : null,
+      guardMs: RETROARCH_EXIT_GUARD_MS,
+    })
+    return true
+  }
+
+  const now = Date.now()
+  if (retroarchExitConfirmUntil > now) {
+    clearRetroarchExitConfirm()
+    requestRetroarchStop('menu')
+    return true
+  }
+
+  retroarchExitConfirmUntil = now + RETROARCH_EXIT_CONFIRM_WINDOW_MS
+  showArcadeOsdMessage(composeArcadeOsdOverlay('Press [MENU] Again To Exit'), {
+    bypassCooldown: true,
+  })
+  console.log('[RETROARCH] MENU exit armed', {
+    windowMs: RETROARCH_EXIT_CONFIRM_WINDOW_MS,
+  })
+  return true
+}
+
 function sendVirtual(proc, type, code, value) {
   if (!proc || !proc.stdin.writable) return
 
@@ -795,17 +1635,17 @@ function handleKey(source, index, value) {
   if (source === 'CASINO') {
     if (retroarchActive && RETROARCH_PRIMARY_INPUT === 'CASINO') {
       if (value === 1 && JOYSTICK_BUTTON_MAP[index] === 'MENU' && CASINO_MENU_EXITS_RETROARCH) {
-        if (canAcceptRetroarchStop()) {
-          requestRetroarchStop('menu')
-          return
-        }
-        console.log('[RETROARCH] MENU ignored by guard', {
-          elapsedMs: retroarchStartedAt ? Date.now() - retroarchStartedAt : null,
-          guardMs: RETROARCH_EXIT_GUARD_MS,
-        })
+        handleRetroarchMenuExitIntent()
+        return
       }
 
       routePlayerInput('P1', index, value)
+      return
+    }
+
+    if (retroarchActive && arcadeSession?.active && isLifePurchaseButton(index)) {
+      const primaryPlayer = normalizeArcadePlayer(RETROARCH_PRIMARY_INPUT) || 'P1'
+      routePlayerInput(primaryPlayer, index, value)
       return
     }
 
@@ -819,15 +1659,9 @@ function handleKey(source, index, value) {
     if (value !== 1) return // only act on press for casino
     const casinoAction = JOYSTICK_BUTTON_MAP[index]
 
-    if (casinoAction === 'MENU' && CASINO_MENU_EXITS_RETROARCH) {
-      if (canAcceptRetroarchStop()) {
-        requestRetroarchStop('menu')
-        return
-      }
-      console.log('[RETROARCH] MENU ignored by guard', {
-        elapsedMs: retroarchStartedAt ? Date.now() - retroarchStartedAt : null,
-        guardMs: RETROARCH_EXIT_GUARD_MS,
-      })
+    if (retroarchActive && casinoAction === 'MENU' && CASINO_MENU_EXITS_RETROARCH) {
+      handleRetroarchMenuExitIntent()
+      return
     }
 
     switch (casinoAction) {
@@ -865,6 +1699,80 @@ function routePlayerInput(source, index, value) {
 
     const target = getRetroVirtualTarget(source)
     if (!target) return
+
+    if (arcadeSession?.active) {
+      const player = normalizeArcadePlayer(source)
+      if (!player) return
+      const locked = !arcadeSession.playerUnlocked[player]
+
+      if (isLifePurchaseButton(index)) {
+        if (value === 1) {
+          if (locked) {
+            arcadeSession.startConfirmUntil[player] = 0
+            requestArcadeLifePurchase(player, target, BTN_START, 'buy_button')
+          } else {
+            showArcadeOsdMessage(composeArcadeOsdOverlay(`P${player.slice(1)} ALREADY UNLOCKED`))
+          }
+        }
+        // Always swallow dedicated purchase button in Arcade Life mode.
+        return
+      }
+
+      if (isStartButton(index)) {
+        if (locked) {
+          if (value === 1) {
+            const now = Date.now()
+            const confirmUntil = Number(arcadeSession.startConfirmUntil?.[player] || 0)
+            if (confirmUntil > now) {
+              arcadeSession.startConfirmUntil[player] = 0
+              requestArcadeLifePurchase(player, target, keyCode, 'start_button')
+            } else {
+              arcadeSession.startConfirmUntil[player] = now + ARCADE_LIFE_START_CONFIRM_WINDOW_MS
+              const priceText = getArcadeSessionPrice().toFixed(2)
+              showArcadeOsdMessage(
+                composeArcadeOsdOverlay(
+                  `P${player.slice(1)} PRESS START AGAIN TO BUY CREDIT (P${priceText})`,
+                ),
+              )
+              broadcastArcadeLifeState('start_confirm_required', {
+                player,
+                confirmWindowMs: ARCADE_LIFE_START_CONFIRM_WINDOW_MS,
+                balance: arcadeSession.lastKnownBalance,
+              })
+            }
+          }
+          // Locked: START does not bill and does not pass through.
+          return
+        }
+
+        arcadeSession.startConfirmUntil[player] = 0
+        // Unlocked: START behaves as a normal gameplay input.
+        sendVirtual(target, EV_KEY, keyCode, value)
+        return
+      }
+
+      if (locked) {
+        if (value === 1) {
+          const priceText = getArcadeSessionPrice().toFixed(2)
+          const actionLabel = getArcadeLifePromptActionLabel()
+          showArcadeOsdMessage(
+            composeArcadeOsdOverlay(
+              `P${player.slice(1)} LOCKED INPUT ${actionLabel} (P${priceText})`,
+            ),
+          )
+          if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
+            startArcadeContinueCountdown(player)
+            broadcastArcadeLifeState('locked', {
+              player,
+              continueSeconds: ARCADE_LIFE_CONTINUE_SECONDS,
+            })
+          } else {
+            broadcastArcadeLifeState('locked', { player })
+          }
+        }
+        return
+      }
+    }
 
     // Forward real press/release state
     sendVirtual(target, EV_KEY, keyCode, value)
@@ -1002,6 +1910,7 @@ function finalizeRetroarchExit(reason) {
   const wasActive = retroarchActive
   const targetUiVT = getTargetUiVT()
   clearRetroarchStopTimers()
+  clearRetroarchExitConfirm()
   retroarchActive = false
   retroarchStopping = false
   retroarchProcess = null
@@ -1019,12 +1928,14 @@ function finalizeRetroarchExit(reason) {
   scheduleForceSwitchToUI(`${reason}-detached`)
 
   if (wasActive) {
+    clearArcadeLifeSession(reason)
     dispatch({ type: 'GAME_EXITED' })
     setTimeout(() => maybeRestartUiAfterExit(reason), 250)
   }
 }
 
 function requestRetroarchStop(reason) {
+  clearRetroarchExitConfirm()
   if (!retroarchActive) return
   const targetUiVT = getTargetUiVT()
 
@@ -1084,6 +1995,7 @@ async function shutdown() {
     player1?.close?.()
     player2?.close?.()
 
+    clearArcadeLifeSession('shutdown')
     requestRetroarchStop('shutdown')
     clearRetroarchStopTimers()
     clearScheduledForceSwitchToUI()
@@ -1772,7 +2684,7 @@ const server = http.createServer((req, res) => {
     body += chunk
   })
 
-  req.on('end', () => {
+  req.on('end', async () => {
     try {
       const payload = JSON.parse(body || '{}')
       console.log('[INPUT HTTP]', payload)
@@ -1787,21 +2699,40 @@ const server = http.createServer((req, res) => {
           return res.end('Missing core or rom')
         }
 
+        const payloadGameId = String(payload.id || '').trim()
+        const payloadGameName = String(payload.name || '').trim()
+        const payloadPrice = toMoney(payload.price, ARCADE_LIFE_PRICE_DEFAULT)
+
+        let gameProfile = {
+          gameId: payloadGameId || path.basename(payload.rom || '') || 'unknown',
+          gameName: payloadGameName || payloadGameId || 'Arcade Game',
+          pricePerLife: payloadPrice > 0 ? payloadPrice : ARCADE_LIFE_PRICE_DEFAULT,
+        }
+
+        if (payloadGameId) {
+          const remoteProfile = await fetchGameProfileForArcadeLife(payloadGameId)
+          if (remoteProfile) {
+            gameProfile = remoteProfile
+          }
+        }
+
         if (retroarchActive) {
           console.warn('[LAUNCH] Ignored — RetroArch already active')
           return res.end('Already running')
         }
 
-      if (Date.now() - lastExitTime < 300) {
-        console.log('[LAUNCH] Ignored — cooldown')
-        return res.end('Cooling down')
-      }
+        if (Date.now() - lastExitTime < 300) {
+          console.log('[LAUNCH] Ignored — cooldown')
+          return res.end('Cooling down')
+        }
 
         if (!IS_PI) {
           console.log('[LAUNCH] compat-mode simulated arcade launch')
           retroarchActive = true
           retroarchStopping = false
+          clearRetroarchExitConfirm()
           retroarchStartedAt = Date.now()
+          startArcadeLifeSession(gameProfile)
           setTimeout(() => {
             finalizeRetroarchExit('compat-simulated')
           }, 250)
@@ -1813,6 +2744,7 @@ const server = http.createServer((req, res) => {
 
         retroarchActive = true
         retroarchStopping = false
+        clearRetroarchExitConfirm()
         retroarchStartedAt = Date.now()
 
         const romPath = resolveRomPath(payload.rom)
@@ -1820,6 +2752,7 @@ const server = http.createServer((req, res) => {
           retroarchActive = false
           retroarchStopping = false
           retroarchStartedAt = 0
+          clearArcadeLifeSession('launch-rom-missing')
           console.error('[LAUNCH] ROM not found', { rom: payload.rom })
           res.writeHead(400)
           return res.end(`ROM not found: ${payload.rom}`)
@@ -1830,6 +2763,7 @@ const server = http.createServer((req, res) => {
           retroarchActive = false
           retroarchStopping = false
           retroarchStartedAt = 0
+          clearArcadeLifeSession('launch-core-missing')
           console.error('[LAUNCH] Core not found', {
             core: payload.core,
             attempted: core.attempted,
@@ -1842,8 +2776,11 @@ const server = http.createServer((req, res) => {
           core: core.coreName,
           corePath: core.path,
           romPath,
+          gameId: gameProfile.gameId,
+          pricePerLife: gameProfile.pricePerLife,
         })
 
+        startArcadeLifeSession(gameProfile)
         retroarchLogFd = fs.openSync(RETROARCH_LOG_PATH, 'a')
         clearScheduledForceSwitchToUI()
 
@@ -1885,6 +2822,7 @@ const server = http.createServer((req, res) => {
 
         retroarchProcess.on('error', err => {
           console.error('[PROCESS] RetroArch spawn error', err.message)
+          clearArcadeLifeSession('spawn-error')
           finalizeRetroarchExit('spawn-error')
         })
 

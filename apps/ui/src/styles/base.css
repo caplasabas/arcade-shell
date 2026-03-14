@@ -197,6 +197,48 @@ button:focus-visible {
     pointer-events: none;
 }
 
+.arcade-life-overlay {
+    position: fixed;
+    top: auto;
+    bottom: 86px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 99990;
+    min-width: 460px;
+    text-align: center;
+    padding: 10px 16px;
+    border: 1px solid rgba(255, 216, 77, 0.9);
+    border-radius: 7px;
+    background: rgba(0, 0, 0, 0.78);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+}
+
+.arcade-life-title {
+    color: #ffffff;
+    font-size: 18px;
+    letter-spacing: 0.03em;
+    font-family: 'Bebas Neue', sans-serif;
+}
+
+.arcade-life-subtitle {
+    color: #ffd84d;
+    font-size: 20px;
+    letter-spacing: 0.03em;
+    font-family: 'Bebas Neue', sans-serif;
+}
+
+.arcade-life-status {
+    color: #d5d5d5;
+    font-size: 14px;
+}
+
+.arcade-life-balance {
+    margin-top: 3px;
+    color: #9df8ad;
+    font-size: 15px;
+}
+
 
 .balance-display {
     display: flex;
@@ -248,6 +290,10 @@ button:focus-visible {
     z-index: 1000;
 }
 
+.modal-backdrop-elevated {
+    z-index: 100001;
+}
+
 
 .modal-card {
     display: flex;
@@ -261,6 +307,11 @@ button:focus-visible {
     border: 2px solid #a07d37;
     color: #dadcd5;
     overflow: hidden;
+}
+
+.modal-card-exit {
+    width: min(560px, 72vw);
+    min-height: auto;
 }
 
 .modal-header {
@@ -329,6 +380,21 @@ button:focus-visible {
 
 .modal-actions .modal-confirm {
     background: #348822;
+}
+
+.modal-exit-message {
+    margin-top: 16px;
+    color: #f7e8b5;
+    font-size: 24px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.modal-exit-hint {
+    margin-top: 10px;
+    color: #d0d3ce;
+    font-size: 17px;
+    font-weight: 500;
 }
 
 

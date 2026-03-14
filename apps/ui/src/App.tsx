@@ -8,6 +8,7 @@ import { exitGame, isGameRunning, launchGame } from './lib/gameLoader'
 import { fetchDeviceBalance, subscribeToDeviceBalance } from './lib/balance'
 import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './lib/games'
 import { WithdrawModal } from './components/WithdrawModal'
+import { ExitConfirmModal, type ExitConfirmContext } from './components/ExitConfirmModal'
 
 import { ensureDeviceRegistered } from './lib/device'
 import { flushMetricEvents, queueMetricEvent } from './lib/metrics'
@@ -31,6 +32,7 @@ export type Game = {
 }
 
 const PAGE_SIZE = 12
+const EXIT_CONFIRM_WINDOW_MS = 2800
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
@@ -42,6 +44,17 @@ type DeviceAdminCommandRow = {
   device_id: string
   command: DeviceAdminCommandType
   status: string
+}
+
+type ArcadeLifeOverlayState = {
+  active: boolean
+  status: string
+  gameId: string | null
+  gameName: string | null
+  pricePerLife: number
+  p1Unlocked: boolean
+  p2Unlocked: boolean
+  balance: number | null
 }
 
 function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
@@ -67,7 +80,6 @@ export default function App() {
   const [focus, setFocus] = useState(0)
   const [runningCasino, setRunningCasino] = useState(false)
   const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
-  const casinoMenuExitAllowedRef = useRef(false)
   const [casinoPreparing, setCasinoPreparing] = useState(false)
   const [casinoLaunchError, setCasinoLaunchError] = useState<string | null>(null)
   const preparedCasinoVersionRef = useRef<Record<string, number>>({})
@@ -153,6 +165,16 @@ export default function App() {
     core?: string
     rom?: string
   } | null>(null)
+  const [arcadeLifeOverlay, setArcadeLifeOverlay] = useState<ArcadeLifeOverlayState>({
+    active: false,
+    status: 'idle',
+    gameId: null,
+    gameName: null,
+    pricePerLife: 10,
+    p1Unlocked: false,
+    p2Unlocked: false,
+    balance: null,
+  })
 
   const runningGameRef = useRef(runningGame)
 
@@ -163,6 +185,11 @@ export default function App() {
   const [withdrawAmount, setWithdrawAmount] = useState(60)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [isWithdrawing, setIsWithdrawing] = useState(false)
+  const [showExitConfirmModal, setShowExitConfirmModal] = useState(false)
+  const [exitConfirmContext, setExitConfirmContext] = useState<ExitConfirmContext | null>(null)
+
+  const exitConfirmDeadlineRef = useRef(0)
+  const exitConfirmTimerRef = useRef<number | null>(null)
 
   const isMissingDeviceRowError = (err: unknown) => {
     const code = String((err as any)?.code ?? '')
@@ -649,12 +676,74 @@ export default function App() {
     })
   }, [showWithdrawModal, isWithdrawDisabled, balance])
 
+  const clearExitConfirmTimer = useCallback(() => {
+    if (exitConfirmTimerRef.current !== null) {
+      window.clearTimeout(exitConfirmTimerRef.current)
+      exitConfirmTimerRef.current = null
+    }
+  }, [])
+
+  const closeExitConfirm = useCallback(() => {
+    clearExitConfirmTimer()
+    exitConfirmDeadlineRef.current = 0
+    setShowExitConfirmModal(false)
+    setExitConfirmContext(null)
+  }, [clearExitConfirmTimer])
+
+  const confirmExit = useCallback(() => {
+    closeExitConfirm()
+    setTimeout(() => {
+      handleExitGame()
+    }, 120)
+  }, [closeExitConfirm])
+
+  const requestExitConfirm = useCallback(
+    (context: ExitConfirmContext) => {
+      if (!runningGameRef.current && !runningCasino) return
+
+      const now = Date.now()
+      if (
+        showExitConfirmModal &&
+        exitConfirmContext === context &&
+        exitConfirmDeadlineRef.current > now
+      ) {
+        confirmExit()
+        return
+      }
+
+      clearExitConfirmTimer()
+      setShowWithdrawModal(false)
+      setExitConfirmContext(context)
+      setShowExitConfirmModal(true)
+
+      exitConfirmDeadlineRef.current = now + EXIT_CONFIRM_WINDOW_MS
+      exitConfirmTimerRef.current = window.setTimeout(() => {
+        closeExitConfirm()
+      }, EXIT_CONFIRM_WINDOW_MS)
+    },
+    [
+      clearExitConfirmTimer,
+      closeExitConfirm,
+      confirmExit,
+      exitConfirmContext,
+      runningCasino,
+      showExitConfirmModal,
+    ],
+  )
+
+  useEffect(() => {
+    return () => {
+      clearExitConfirmTimer()
+    }
+  }, [clearExitConfirmTimer])
+
   const shellStateRef = useRef({
     initialized: false,
     balance: 0,
     withdrawAmount: 0,
     isWithdrawing: false,
     showWithdrawModal: false,
+    showExitConfirmModal: false,
     runningCasino: false,
   })
 
@@ -665,35 +754,35 @@ export default function App() {
       withdrawAmount,
       isWithdrawing,
       showWithdrawModal,
+      showExitConfirmModal,
       runningCasino,
     }
-  }, [initialized, balance, withdrawAmount, isWithdrawing, showWithdrawModal, runningCasino])
-
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      const payload = event.data
-      if (!payload || typeof payload !== 'object') return
-
-      if (payload.type === 'ULTRAACE_MENU_EXIT_STATE') {
-        casinoMenuExitAllowedRef.current = Boolean(payload.canExit)
-        return
-      }
-    }
-
-    window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
-  }, [])
+  }, [
+    initialized,
+    balance,
+    withdrawAmount,
+    isWithdrawing,
+    showWithdrawModal,
+    showExitConfirmModal,
+    runningCasino,
+  ])
 
   const addWithdrawAmountRef = useRef(addWithdrawAmount)
   const minusWithdrawAmountRef = useRef(minusWithdrawAmount)
   const setShowWithdrawModalRef = useRef(setShowWithdrawModal)
   const setIsWithdrawingRef = useRef(setIsWithdrawing)
+  const requestExitConfirmRef = useRef(requestExitConfirm)
+  const confirmExitRef = useRef(confirmExit)
+  const closeExitConfirmRef = useRef(closeExitConfirm)
 
   useEffect(() => {
     setShowWithdrawModalRef.current = setShowWithdrawModal
     setIsWithdrawingRef.current = setIsWithdrawing
     addWithdrawAmountRef.current = addWithdrawAmount
     minusWithdrawAmountRef.current = minusWithdrawAmount
+    requestExitConfirmRef.current = requestExitConfirm
+    confirmExitRef.current = confirmExit
+    closeExitConfirmRef.current = closeExitConfirm
   })
 
   const focusRef = useRef(focus)
@@ -806,8 +895,42 @@ export default function App() {
 
       if (!payload || !s.initialized) return
 
+      if (payload.type === 'ARCADE_LIFE_STATE') {
+        setArcadeLifeOverlay({
+          active: Boolean(payload.active),
+          status: String(payload.status ?? 'state'),
+          gameId: payload.gameId ?? null,
+          gameName: payload.gameName ?? null,
+          pricePerLife: Number(payload.pricePerLife ?? 10),
+          p1Unlocked: Boolean(payload.p1Unlocked),
+          p2Unlocked: Boolean(payload.p2Unlocked),
+          balance:
+            payload.balance === null || payload.balance === undefined
+              ? null
+              : Number(payload.balance),
+        })
+        return
+      }
+
+      if (payload.type === 'ARCADE_LIFE_SESSION_ENDED') {
+        setArcadeLifeOverlay(prev => ({
+          ...prev,
+          active: false,
+          status: String(payload.status ?? 'ended'),
+          p1Unlocked: false,
+          p2Unlocked: false,
+        }))
+      }
+
       if (payload.type === 'GAME_EXITED') {
         console.log('[UI] GAME_EXITED received')
+        setArcadeLifeOverlay(prev => ({
+          ...prev,
+          active: false,
+          status: 'exited',
+          p1Unlocked: false,
+          p2Unlocked: false,
+        }))
         handleExitGame()
 
         if (deviceIdRef.current) {
@@ -847,6 +970,18 @@ export default function App() {
           return
         }
 
+        if (s.showExitConfirmModal) {
+          if (button === 6 || button === 7 || button === 0) {
+            confirmExitRef.current()
+            return
+          }
+          if (button === 1 || button === 5) {
+            closeExitConfirmRef.current()
+            return
+          }
+          return
+        }
+
         if (!s.showWithdrawModal && !s.isWithdrawing) {
           handleMenuInput(button)
         }
@@ -879,11 +1014,16 @@ export default function App() {
 
         switch (payload.action) {
           case 'MENU': {
+            if (s.showExitConfirmModal) {
+              confirmExitRef.current()
+              return
+            }
             if (s.showWithdrawModal) {
               setShowWithdrawModalRef.current(false)
               return
             }
-            break
+            requestExitConfirmRef.current('menu')
+            return
           }
 
           case 'BET_UP': {
@@ -919,12 +1059,18 @@ export default function App() {
             break
           }
         }
-      } else if (payload.type === 'ACTION' && payload.action === 'MENU') {
-        if (!casinoMenuExitAllowedRef.current) return
-        setTimeout(() => {
-          handleExitGame()
-        }, 300)
-        return
+      } else if (payload.type === 'ACTION') {
+        if (payload.action === 'MENU') {
+          if (s.showExitConfirmModal) {
+            confirmExitRef.current()
+            return
+          }
+          requestExitConfirmRef.current('casino')
+          return
+        }
+        if (s.showExitConfirmModal) {
+          closeExitConfirmRef.current()
+        }
       }
     }
 
@@ -948,10 +1094,7 @@ export default function App() {
         moveFocus(1)
         break
       case 6:
-        setTimeout(() => {
-          handleExitGame()
-        }, 300)
-
+        requestExitConfirm('menu')
         break
       case 7: // A button still numeric
         if (selectedGameRef.current) launch(selectedGameRef.current)
@@ -961,10 +1104,17 @@ export default function App() {
 
   function handleExitGame() {
     // if (!runningGame && !runningCasino) return
-    casinoMenuExitAllowedRef.current = false
+    closeExitConfirm()
     setRunningGame(null)
     setRunningCasino(false)
     setRunningCasinoSrc(null)
+    setArcadeLifeOverlay(prev => ({
+      ...prev,
+      active: false,
+      status: 'idle',
+      p1Unlocked: false,
+      p2Unlocked: false,
+    }))
     exitGame()
   }
 
@@ -996,9 +1146,9 @@ export default function App() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // EXIT ALWAYS WINS
       if (e.key === 'Escape') {
-        handleExitGame()
+        const context: ExitConfirmContext = runningCasino ? 'casino' : 'menu'
+        requestExitConfirm(context)
         return
       }
 
@@ -1030,7 +1180,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [focus, page, selectedGame])
+  }, [focus, page, requestExitConfirm, runningCasino, selectedGame])
 
   async function launch(game: Game) {
     if (!game || isGameRunning()) return
@@ -1123,6 +1273,8 @@ export default function App() {
         body: JSON.stringify({
           type: 'LAUNCH_GAME',
           id: game.id,
+          name: game.name,
+          price: game.price,
           core: game.emulator_core,
           rom: game.rom_path,
         }),
@@ -1284,6 +1436,13 @@ export default function App() {
           }}
         />
       )}
+      {showExitConfirmModal && (
+        <ExitConfirmModal
+          context={exitConfirmContext ?? (runningCasino ? 'casino' : 'menu')}
+          onCancel={closeExitConfirm}
+          onConfirm={confirmExit}
+        />
+      )}
       {selectedGame && (
         <div className="scene-bg" style={{ backgroundImage: `url(${selectedGame.art})` }} />
       )}
@@ -1297,6 +1456,23 @@ export default function App() {
       )}
 
       <GameGrid balance={balance} games={pageGames} focusedIndex={focus} page={page} />
+      {!runningCasino && runningGame?.type === 'arcade' && arcadeLifeOverlay.active && (
+        <div className="arcade-life-overlay">
+          <div className="arcade-life-title">{arcadeLifeOverlay.gameName ?? 'Arcade'}</div>
+          <div className="arcade-life-subtitle">
+            PRESS START TO BUY LIFE ({formatPeso(arcadeLifeOverlay.pricePerLife)})
+          </div>
+          <div className="arcade-life-status">
+            P1 {arcadeLifeOverlay.p1Unlocked ? 'READY' : 'LOCKED'} | P2{' '}
+            {arcadeLifeOverlay.p2Unlocked ? 'READY' : 'LOCKED'}
+          </div>
+          {arcadeLifeOverlay.balance !== null && (
+            <div className="balance-display arcade-life-balance-display">
+              Balance <span className="balance-amount">{formatPeso(arcadeLifeOverlay.balance)}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {!runningCasino && (
         <div className="overlay-hud">

@@ -9,6 +9,7 @@ StartLimitIntervalSec=60
 Type=simple
 User=root
 WorkingDirectory=/home/arcade1/arcade/apps/service
+EnvironmentFile=-/home/arcade1/arcade/.env.arcade-service
 
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/arcade1/.Xauthority
@@ -18,8 +19,22 @@ Environment=RETROARCH_TTY_MODE=1
 Environment=ARCADE_UI_VT=2
 Environment=ARCADE_GAME_VT=1
 Environment=RETROARCH_PRIMARY_INPUT=P1
+Environment=RETROARCH_CONFIG_PATH=/home/arcade1/arcade/os/retroarch.cfg
 Environment=CASINO_MENU_EXITS_RETROARCH=1
 Environment=ARCADE_RESTART_UI_ON_GAME_EXIT=0
+Environment=ARCADE_LIFE_DEDUCT_MODE=unlock_once
+Environment=ARCADE_LIFE_START_CONFIRM_WINDOW_MS=2500
+Environment=ARCADE_LIFE_PURCHASE_BUTTON_INDEXES=8
+Environment=ARCADE_LIFE_PURCHASE_LABEL=BUY
+Environment=ARCADE_RETRO_OSD=1
+Environment=RETROARCH_NETCMD_PORT=55355
+Environment=RETROARCH_OSD_COMMAND=AUTO
+Environment=ARCADE_RETRO_OSD_STYLE=footer
+Environment=ARCADE_RETRO_OSD_SHOW_SESSION_STATS=0
+Environment=ARCADE_RETRO_OSD_PROMPT_PERSIST=1
+Environment=ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS=1200
+Environment=ARCADE_RETRO_OSD_PROMPT_BLINK=0
+Environment=ARCADE_LIFE_BALANCE_SYNC_INTERVAL_MS=1000
 
 ExecStart=/usr/bin/node input.js
 Restart=always

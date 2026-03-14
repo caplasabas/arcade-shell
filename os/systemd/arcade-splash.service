@@ -5,21 +5,18 @@ After=local-fs.target
 After=systemd-udev-settle.service
 Wants=systemd-udev-settle.service
 Before=arcade-ui.service
-Before=getty@tty3.service
-Conflicts=getty@tty3.service
 
 [Service]
 Type=simple
 Environment=SPLASH_IMAGE_PRIMARY=/home/arcade1/arcade/apps/ui/src/assets/boot.png
 Environment=SPLASH_IMAGE_FALLBACK=/boot/firmware/splash.png
-ExecStartPre=/usr/bin/chvt 3
+ExecStartPre=/usr/bin/chvt 2
 ExecStartPre=/bin/sh -lc 'for i in $(seq 1 50); do [ -e /dev/fb0 ] && exit 0; sleep 0.1; done; exit 1'
-ExecStart=/bin/sh -lc 'IMG="$SPLASH_IMAGE_PRIMARY"; if [ ! -f "$IMG" ]; then IMG="$SPLASH_IMAGE_FALLBACK"; fi; exec /usr/bin/fbi -T 3 -noverbose -a "$IMG"'
-ExecStop=/usr/bin/pkill -x fbi
-TTYPath=/dev/tty3
+ExecStart=/bin/sh -lc 'IMG="$SPLASH_IMAGE_PRIMARY"; if [ ! -f "$IMG" ]; then IMG="$SPLASH_IMAGE_FALLBACK"; fi; [ -r "$IMG" ] || exit 1; exec /usr/bin/fbi -T 2 -d /dev/fb0 -noverbose -a --nointeractive "$IMG" </dev/tty2 >/dev/tty2 2>/dev/tty2'
+TTYPath=/dev/tty2
 StandardInput=tty
 StandardOutput=tty
-RemainAfterExit=yes
+StandardError=tty
 
 [Install]
 WantedBy=multi-user.target
