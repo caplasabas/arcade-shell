@@ -143,7 +143,8 @@ const UI_VT = process.env.ARCADE_UI_VT || '2'
 const RETROARCH_STOP_GRACE_MS = 3000
 const RETROARCH_LOG_PATH = '/tmp/retroarch.log'
 const RETROARCH_TERM_FALLBACK_MS = 1200
-const RETROARCH_USE_TTY_MODE = process.env.RETROARCH_TTY_MODE === '1'
+const SINGLE_X_MODE = process.env.RETROARCH_SINGLE_X === '1'
+const RETROARCH_USE_TTY_MODE = !SINGLE_X_MODE && process.env.RETROARCH_TTY_MODE === '1'
 const RETROARCH_RUN_USER = process.env.RETROARCH_RUN_USER || 'arcade1'
 const RETROARCH_RUN_UID = String(process.env.RETROARCH_RUN_UID || '1000')
 const RETROARCH_RUN_HOME = process.env.RETROARCH_RUN_HOME || `/home/${RETROARCH_RUN_USER}`
@@ -160,6 +161,13 @@ const SUPABASE_URL = String(process.env.SUPABASE_URL || '')
   .trim()
   .replace(/\/+$/, '')
 const SUPABASE_SERVICE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
+
+console.log('[RETRO MODE]', {
+  SINGLE_X_MODE,
+  RETROARCH_USE_TTY_MODE,
+  DISPLAY: process.env.DISPLAY || null,
+  XAUTHORITY: process.env.XAUTHORITY || null,
+})
 
 function parseNonNegativeMs(value, fallback) {
   const parsed = Number(value)
@@ -205,6 +213,7 @@ const ARCADE_LIFE_START_CONFIRM_WINDOW_MS = parseNonNegativeMs(
   process.env.ARCADE_LIFE_START_CONFIRM_WINDOW_MS,
   2500,
 )
+const ARCADE_LIFE_CREDIT_TTL_MS = parseNonNegativeMs(process.env.ARCADE_LIFE_CREDIT_TTL_MS, 120000)
 const ARCADE_LIFE_FAIL_OPEN = process.env.ARCADE_LIFE_FAIL_OPEN === '1'
 const ARCADE_RETRO_OSD_ENABLED = process.env.ARCADE_RETRO_OSD !== '0'
 const RETROARCH_NETCMD_HOST = process.env.RETROARCH_NETCMD_HOST || '127.0.0.1'
@@ -270,10 +279,122 @@ const START_BUTTON_INDEXES = new Set([7, 9])
 
 let lastUiVT = UI_VT
 let lastUiRestartAt = 0
+
+let chromiumUiHidden = false
+
+function getXClientEnv() {
+  return {
+    ...process.env,
+    DISPLAY: process.env.DISPLAY || ':0',
+    XAUTHORITY: process.env.XAUTHORITY || `${RETROARCH_RUN_HOME}/.Xauthority`,
+    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || RETROARCH_RUNTIME_DIR,
+  }
+}
+
+function runXClientCommand(command, args, label) {
+  try {
+    const proc = spawn(command, args, {
+      env: getXClientEnv(),
+      detached: true,
+      stdio: 'ignore',
+    })
+    proc.on('error', err => {
+      console.warn(`[UI] ${label} failed: ${err.message}`)
+    })
+    proc.unref()
+    return true
+  } catch (err) {
+    console.warn(`[UI] ${label} failed: ${err.message}`)
+    return false
+  }
+}
+
+function hasCommand(name) {
+  const result = spawnSync('sh', ['-lc', `command -v ${name} >/dev/null 2>&1`], {
+    stdio: 'ignore',
+  })
+  return result.status === 0
+}
+
+const UI_DISABLE_FLAG_PATH = '/tmp/arcade-ui-disabled'
+
+function hideChromiumUiForRetroarch() {
+  if (!SINGLE_X_MODE) return
+  if (chromiumUiHidden) return
+
+  let attempted = false
+
+  if (hasCommand('xdotool')) {
+    attempted = true
+    runXClientCommand(
+      'sh',
+      [
+        '-lc',
+        'xdotool search --onlyvisible --class chromium windowunmap %@ >/dev/null 2>&1 || true',
+      ],
+      'xdotool minimize chromium',
+    )
+  }
+
+  if (hasCommand('wmctrl')) {
+    attempted = true
+    runXClientCommand(
+      'sh',
+      ['-lc', 'wmctrl -x -r chromium.Chromium -b add,hidden >/dev/null 2>&1 || true'],
+      'wmctrl hide chromium',
+    )
+  }
+
+  if (attempted) {
+    chromiumUiHidden = true
+    console.log('[UI] Chromium hide requested before RetroArch launch')
+  } else {
+    console.log('[UI] Chromium hide skipped (xdotool/wmctrl not installed)')
+  }
+}
+
+function restoreChromiumUiAfterRetroarch() {
+  if (!SINGLE_X_MODE) return
+  if (!chromiumUiHidden) return
+
+  let attempted = false
+
+  if (hasCommand('xdotool')) {
+    attempted = true
+    runXClientCommand(
+      'sh',
+      [
+        '-lc',
+        'xdotool search --class chromium windowmap %@ windowraise %@ >/dev/null 2>&1 || true',
+      ],
+      'xdotool restore chromium',
+    )
+  }
+
+  if (hasCommand('wmctrl')) {
+    attempted = true
+    runXClientCommand(
+      'sh',
+      [
+        '-lc',
+        'wmctrl -x -r chromium.Chromium -b remove,hidden >/dev/null 2>&1 || true; wmctrl -x -a chromium.Chromium >/dev/null 2>&1 || true',
+      ],
+      'wmctrl restore chromium',
+    )
+  }
+
+  chromiumUiHidden = false
+
+  if (attempted) {
+    console.log('[UI] Chromium restore requested after RetroArch exit')
+  }
+}
+
 let arcadeSession = null
 let lastArcadeOsdMessage = ''
 let lastArcadeOsdAt = 0
 const arcadeContinueCountdownTimers = { P1: null, P2: null }
+const arcadeCreditExpiryTimers = { P1: null, P2: null }
 let arcadePromptLoopTimer = null
 let arcadePromptBlinkPhase = false
 let arcadeBalanceSyncTimer = null
@@ -304,7 +425,7 @@ ARCADE INPUT SERVICE
 USB Encoder : /dev/input/casino
 GPIO Chip   : ${GPIOCHIP}
 Runtime Mode: ${IS_PI ? 'Raspberry Pi (hardware)' : `compat (${process.platform})`}
-VT Map      : ui=${UI_VT} game=${GAME_VT}
+Display Mode : ${SINGLE_X_MODE ? 'single-x(:0)' : `tty ui=${UI_VT} game=${GAME_VT}`}
 Retro P1 In : ${RETROARCH_PRIMARY_INPUT}
 Casino Exit : ${CASINO_MENU_EXITS_RETROARCH ? 'enabled' : 'disabled'}
 Exit Guard  : ${RETROARCH_EXIT_GUARD_MS}ms
@@ -482,9 +603,11 @@ function showArcadeOsdMessage(message, options = {}) {
 
   const allowBlank = options?.allowBlank === true
   const bypassCooldown = options?.bypassCooldown === true
-  const normalized = String(message || '')
-    .replace(/\s+/g, ' ')
-    .slice(0, 120)
+  const source = String(message || '').replace(/[\r\n\t]/g, ' ')
+  const normalized =
+    ARCADE_RETRO_OSD_STYLE === 'footer'
+      ? source.slice(0, 180)
+      : source.replace(/\s+/g, ' ').slice(0, 120)
   const text = allowBlank ? normalized : normalized.trim()
   if (!text && !allowBlank) return
 
@@ -498,9 +621,9 @@ function showArcadeOsdMessage(message, options = {}) {
   lastArcadeOsdAt = now
 
   const osdCommands = (() => {
-    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MESG', 'SHOW_MSG']
-    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG', 'SHOW_MESG']
-    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG', 'SHOW_MSG']
+    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MESG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG']
     return [RETROARCH_OSD_COMMAND]
   })()
 
@@ -535,13 +658,35 @@ function composeArcadeOsdOverlay(message, balanceOverride = null, options = null
   const balanceBanner = `Balance ₱${balanceText}`
 
   if (ARCADE_RETRO_OSD_STYLE === 'footer') {
-    const parts = [balanceBanner]
-    if (base) parts.push(base)
-    const continueSeconds = Number(options?.continueSeconds)
-    if (Number.isFinite(continueSeconds) && continueSeconds >= 0) {
-      parts.push(`CONTINUE ${String(Math.round(continueSeconds)).padStart(2, '0')}`)
+    const now = Date.now()
+    const p1Ready = Boolean(arcadeSession.playerUnlocked?.P1)
+    const p2Ready = Boolean(arcadeSession.playerUnlocked?.P2)
+
+    const p1ConfirmArmed = Number(arcadeSession.startConfirmUntil?.P1 || 0) > now
+    const p2ConfirmArmed = Number(arcadeSession.startConfirmUntil?.P2 || 0) > now
+    const exitConfirmArmed = Number(retroarchExitConfirmUntil || 0) > now
+
+    const leftText = p1Ready ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+    const centerText = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
+    const rightText = p2Ready ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+
+    const centerIn = (txt, w) => {
+      const clean = String(txt || '')
+      if (clean.length >= w) return clean.slice(0, w)
+      const leftPad = Math.floor((w - clean.length) / 2)
+      const rightPad = w - clean.length - leftPad
+      return `${' '.repeat(leftPad)}${clean}${' '.repeat(rightPad)}`
     }
-    return parts.join(' | ')
+
+    // 3 equal visual zones inside one OSD line.
+    const colW = 20
+    const gap = '       '
+
+    const leftCol = centerIn(leftText, colW)
+    const centerCol = centerIn(centerText, colW)
+    const rightCol = centerIn(rightText, colW)
+
+    return `${leftCol}${gap}${centerCol}${gap}${rightCol}`
   }
 
   if (ARCADE_RETRO_OSD_STYLE === 'hud') {
@@ -589,6 +734,42 @@ function clearArcadeContinueCountdown(player = null) {
     clearTimeout(timer)
     arcadeContinueCountdownTimers[currentPlayer] = null
   }
+}
+
+function clearArcadeCreditExpiry(player = null) {
+  const players =
+    player && arcadeCreditExpiryTimers[player] !== undefined
+      ? [player]
+      : Object.keys(arcadeCreditExpiryTimers)
+
+  for (const currentPlayer of players) {
+    const timer = arcadeCreditExpiryTimers[currentPlayer]
+    if (!timer) continue
+    clearTimeout(timer)
+    arcadeCreditExpiryTimers[currentPlayer] = null
+  }
+}
+
+function scheduleArcadeCreditExpiry(player) {
+  if (!arcadeSession?.active) return
+  if (player !== 'P1' && player !== 'P2') return
+
+  clearArcadeCreditExpiry(player)
+
+  if (ARCADE_LIFE_CREDIT_TTL_MS <= 0) return
+
+  arcadeCreditExpiryTimers[player] = setTimeout(() => {
+    if (!arcadeSession?.active) return
+    if (!arcadeSession.playerUnlocked?.[player]) return
+
+    arcadeSession.playerUnlocked[player] = false
+    arcadeSession.playerLivesPurchased[player] = 0
+    arcadeSession.startConfirmUntil[player] = 0
+    arcadeCreditExpiryTimers[player] = null
+
+    showArcadeOsdMessage(composeArcadeOsdOverlay('PRESS [START]'), { bypassCooldown: true })
+    broadcastArcadeLifeState('credit_expired', { player, ttlMs: ARCADE_LIFE_CREDIT_TTL_MS })
+  }, ARCADE_LIFE_CREDIT_TTL_MS)
 }
 
 function clearArcadePromptLoop() {
@@ -811,6 +992,7 @@ function startArcadeLifeSession({ gameId, gameName, pricePerLife }) {
   clearArcadeBalanceSyncLoop()
   clearArcadePromptLoop()
   clearArcadeContinueCountdown()
+  clearArcadeCreditExpiry()
   arcadeSession = {
     active: true,
     gameId: String(gameId || '').trim() || 'unknown',
@@ -855,6 +1037,7 @@ function clearArcadeLifeSession(reason = 'ended') {
   clearArcadeBalanceSyncLoop()
   clearArcadePromptLoop()
   clearArcadeContinueCountdown()
+  clearArcadeCreditExpiry()
   dispatch({
     type: 'ARCADE_LIFE_SESSION_ENDED',
     status: reason,
@@ -1032,7 +1215,8 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
       if (result.ok) {
         clearArcadeContinueCountdown(player)
         sessionRef.playerUnlocked[player] = true
-        sessionRef.playerLivesPurchased[player] += 1
+        sessionRef.playerLivesPurchased[player] = 1
+        scheduleArcadeCreditExpiry(player)
 
         const priceText = getArcadeSessionPrice().toFixed(2)
         const balanceText =
@@ -1577,10 +1761,10 @@ function handleRawAxis(source, code, value) {
     return
   }
 
-  if (!RETROARCH_USE_TTY_MODE) {
-    // Single-X mode: RetroArch reads real devices directly.
-    return
-  }
+  // if (!RETROARCH_USE_TTY_MODE) {
+  //   // Single-X mode: RetroArch reads real devices directly.
+  //   return
+  // }
 
   const mappedSource = resolveRetroInputSource(source)
   const target = getRetroVirtualTarget(source)
@@ -1692,10 +1876,10 @@ function routePlayerInput(source, index, value) {
   if (!keyCode) return
 
   if (retroarchActive) {
-    if (!RETROARCH_USE_TTY_MODE) {
-      // Single-X mode: RetroArch reads real devices directly.
-      return
-    }
+    // if (!RETROARCH_USE_TTY_MODE) {
+    //   // Single-X mode: RetroArch reads real devices directly.
+    //   return
+    // }
 
     const target = getRetroVirtualTarget(source)
     if (!target) return
@@ -1719,6 +1903,11 @@ function routePlayerInput(source, index, value) {
       }
 
       if (isStartButton(index)) {
+        if (value === 1) {
+          // START interaction cancels any armed MENU exit intent.
+          clearRetroarchExitConfirm()
+        }
+
         if (locked) {
           if (value === 1) {
             const now = Date.now()
@@ -1728,12 +1917,7 @@ function routePlayerInput(source, index, value) {
               requestArcadeLifePurchase(player, target, keyCode, 'start_button')
             } else {
               arcadeSession.startConfirmUntil[player] = now + ARCADE_LIFE_START_CONFIRM_WINDOW_MS
-              const priceText = getArcadeSessionPrice().toFixed(2)
-              showArcadeOsdMessage(
-                composeArcadeOsdOverlay(
-                  `P${player.slice(1)} PRESS START AGAIN TO BUY CREDIT (P${priceText})`,
-                ),
-              )
+              showArcadeOsdMessage(composeArcadeOsdOverlay('START GAME?'))
               broadcastArcadeLifeState('start_confirm_required', {
                 player,
                 confirmWindowMs: ARCADE_LIFE_START_CONFIRM_WINDOW_MS,
@@ -1741,7 +1925,7 @@ function routePlayerInput(source, index, value) {
               })
             }
           }
-          // Locked: START does not bill and does not pass through.
+          // Locked: START only purchases on second press within confirm window.
           return
         }
 
@@ -1794,6 +1978,7 @@ function routePlayerInput(source, index, value) {
 }
 
 function switchToVT(vt, reason) {
+  if (SINGLE_X_MODE) return true
   if (!RETROARCH_USE_TTY_MODE) return true
   if (!IS_PI) return true
 
@@ -1813,6 +1998,7 @@ function switchToVT(vt, reason) {
 }
 
 function switchToVTWithRetry(vt, reason, attempts = 5, delayMs = 150) {
+  if (SINGLE_X_MODE) return
   if (!RETROARCH_USE_TTY_MODE) return
   if (!IS_PI) return
 
@@ -1830,6 +2016,7 @@ function switchToVTWithRetry(vt, reason, attempts = 5, delayMs = 150) {
 }
 
 function scheduleForceSwitchToUI(reason, delayMs = 900) {
+  if (SINGLE_X_MODE) return
   if (!RETROARCH_USE_TTY_MODE || !IS_PI) return
 
   if (pendingUiFallbackTimer !== null) {
@@ -1923,9 +2110,13 @@ function finalizeRetroarchExit(reason) {
     retroarchLogFd = null
   }
 
-  switchToVTWithRetry(targetUiVT, reason)
-  setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-post`), 450)
-  scheduleForceSwitchToUI(`${reason}-detached`)
+  if (SINGLE_X_MODE) {
+    restoreChromiumUiAfterRetroarch()
+  } else {
+    switchToVTWithRetry(targetUiVT, reason)
+    setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-post`), 450)
+    scheduleForceSwitchToUI(`${reason}-detached`)
+  }
 
   if (wasActive) {
     clearArcadeLifeSession(reason)
@@ -1951,7 +2142,12 @@ function requestRetroarchStop(reason) {
   const stopTargetPid = retroarchProcess.pid
 
   sendRetroarchSignal('SIGINT', `${reason}-graceful`)
-  console.log(`[VT] waiting for RetroArch exit before returning to ${targetUiVT}`)
+
+  if (SINGLE_X_MODE) {
+    console.log('[DISPLAY] waiting for RetroArch exit on DISPLAY=:0')
+  } else {
+    console.log(`[VT] waiting for RetroArch exit before returning to ${targetUiVT}`)
+  }
 
   retroarchStopTermTimer = setTimeout(() => {
     retroarchStopTermTimer = null
@@ -2784,26 +2980,32 @@ const server = http.createServer((req, res) => {
         retroarchLogFd = fs.openSync(RETROARCH_LOG_PATH, 'a')
         clearScheduledForceSwitchToUI()
 
-        const activeVT = getActiveVT()
-        if (activeVT) {
-          lastUiVT = activeVT
-          console.log(`[VT] captured UI VT ${lastUiVT} before launch`)
+        if (SINGLE_X_MODE) {
+          hideChromiumUiForRetroarch()
+          console.log('[DISPLAY] launching RetroArch into DISPLAY=:0')
+        } else {
+          const activeVT = getActiveVT()
+          if (activeVT) {
+            lastUiVT = activeVT
+            console.log(`[VT] captured UI VT ${lastUiVT} before launch`)
+          }
+          switchToVT(GAME_VT, 'launch')
         }
-
-        switchToVT(GAME_VT, 'launch')
 
         const command = ['-u', RETROARCH_RUN_USER, 'env']
-        if (RETROARCH_USE_TTY_MODE) {
+
+        if (SINGLE_X_MODE) {
+          command.push('DISPLAY=:0', `XAUTHORITY=${RETROARCH_RUN_HOME}/.Xauthority`)
+        } else {
           command.push('-u', 'DISPLAY', '-u', 'XAUTHORITY', '-u', 'WAYLAND_DISPLAY')
         }
+
         command.push(
           `XDG_RUNTIME_DIR=${RETROARCH_RUNTIME_DIR}`,
           `DBUS_SESSION_BUS_ADDRESS=${RETROARCH_DBUS_ADDRESS}`,
           `PULSE_SERVER=${RETROARCH_PULSE_SERVER}`,
         )
-        if (!RETROARCH_USE_TTY_MODE) {
-          command.push('DISPLAY=:0', `XAUTHORITY=${RETROARCH_RUN_HOME}/.Xauthority`)
-        }
+
         if (RETROARCH_USE_DBUS_RUN_SESSION) command.push('dbus-run-session', '--')
         command.push('retroarch', '--fullscreen', '--verbose')
 
@@ -2811,7 +3013,13 @@ const server = http.createServer((req, res) => {
           command.push('--config', RETROARCH_CONFIG_PATH)
         }
 
+        // if (SINGLE_X_MODE) {
+        //   command.push('--appendconfig', '/home/arcade1/arcade/os/retroarch-single-x.cfg')
+        // }
+
         command.push('-L', core.path, romPath)
+
+        console.log('[LAUNCH] sudo argv', command)
 
         retroarchProcess = spawn('sudo', command, {
           stdio: ['ignore', retroarchLogFd, retroarchLogFd],

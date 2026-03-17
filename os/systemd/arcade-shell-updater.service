@@ -1,0 +1,20 @@
+[Unit]
+Description=Arcade Shell Auto Updater
+After=network-online.target
+Before=arcade-input.service arcade-ui.service
+Wants=arcade-input.service arcade-ui.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/arcade-shell-updater.mjs
+Environment=SUPABASE_URL=https://rrdnfvbyfjvowiqpgsax.supabase.co
+Environment=SUPABASE_SERVICE_ROLE_KEY=sb_secret_AjqnokH2mHl_BenbbVHIEQ_zWzqNVWS
+Environment=GAME_PACKAGE_KEY_HEX=e93e36263af461dd686403aa98b20a1e084818359af81258fdb9b17828940620
+Environment=NODE_ENV=production
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -18,7 +18,6 @@ export function ExitConfirmModal({ context, onConfirm, onCancel }: Props) {
 
         <div className="modal-body">
           <div className="modal-exit-message">Press MENU again to confirm exit.</div>
-          <div className="modal-exit-hint">A/START = Confirm, B = Cancel</div>
         </div>
 
         <div className="modal-actions">

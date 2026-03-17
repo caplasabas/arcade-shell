@@ -1,15 +1,18 @@
 [Unit]
 Description=Arcade Xorg + Chromium Kiosk
-After=arcade-input.service systemd-user-sessions.service arcade-splash.service
-Wants=arcade-input.service arcade-splash.service
+After=systemd-user-sessions.service network.target
+Wants=network.target
 
 [Service]
 User=arcade1
+Group=arcade1
+WorkingDirectory=/home/arcade1
+
+Environment=HOME=/home/arcade1
+Environment=USER=arcade1
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/arcade1/.Xauthority
 Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 
 TTYPath=/dev/tty2
 StandardInput=tty
