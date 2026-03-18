@@ -4,6 +4,8 @@ import { GameGrid } from './components/GameGrid'
 import { NoInternetModal } from './components/NoInternetModal'
 import { WifiSetupModal } from './components/WifiSetupModal'
 
+import { ArcadeShellVersionBadge } from './components/ArcadeShellVersionBadge'
+
 import { exitGame, isGameRunning, launchGame } from './lib/gameLoader'
 import { fetchDeviceBalance, subscribeToDeviceBalance } from './lib/balance'
 import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './lib/games'
@@ -37,6 +39,8 @@ const EXIT_CONFIRM_WINDOW_MS = 2800
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
+const ARCADE_SHELL_VERSION =
+  String(import.meta.env.VITE_ARCADE_SHELL_VERSION || '').trim() || '0.6.0'
 
 type DeviceAdminCommandType = 'restart' | 'shutdown'
 
@@ -1557,23 +1561,26 @@ export default function App() {
       {/*)}*/}
 
       {!runningCasino && (
-        <div className="overlay-hud">
-          <div className="balance-display">
-            Balance <span className="balance-amount">{formatPeso(balance ?? 0)}</span>
-          </div>
+        <>
+          <div className="overlay-hud">
+            <div className="balance-display">
+              Balance <span className="balance-amount">{formatPeso(balance ?? 0)}</span>
+            </div>
 
-          <div className="device-info">
-            <label className="device-label">
-              Device:<span>{deviceId}</span>{' '}
-            </label>
-            <label className="device-label">
-              IP:<span>{ethernetIp ? `eth0 ${ethernetIp}` : ''}</span>
-              <span>{ethernetIp && wifiIp ? ' | ' : ''}</span>
-              <span>{wifiIp ? `wlan0 ${wifiIp}` : ''}</span>
-              <span>{!ethernetIp && !wifiIp ? 'N/A' : ''}</span>
-            </label>
+            <div className="device-info">
+              <label className="device-label">
+                Device ID#:<span>{deviceId}</span>{' '}
+              </label>
+              <label className="device-label">
+                IP:<span>{ethernetIp ? `eth0 ${ethernetIp}` : ''}</span>
+                <span>{ethernetIp && wifiIp ? '|' : ''}</span>
+                <span>{wifiIp ? `wlan0 ${wifiIp}` : ''}</span>
+                <span>{!ethernetIp && !wifiIp ? 'N/A' : ''}</span>
+              </label>
+            </div>
+            <ArcadeShellVersionBadge />
           </div>
-        </div>
+        </>
       )}
       {runningCasino && (
         <div

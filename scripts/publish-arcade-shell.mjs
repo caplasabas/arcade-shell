@@ -8,86 +8,138 @@ function fail(message, code = 1) {
   process.exit(code)
 }
 
-const supabaseUrl = process.env.SUPABASE_URL
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+function normalizeUrl(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\/+$/, '')
+}
+
+function run(command, args, env) {
+  const result = spawnSync(command, args, {
+    stdio: 'inherit',
+    env,
+  })
+
+  if (result.error) {
+    fail(`${command} failed: ${result.error.message}`)
+  }
+
+  if (result.status !== 0) {
+    fail(`${command} ${args.join(' ')} failed`, result.status || 1)
+  }
+}
+
+function readJson(filePath, label) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+  } catch (error) {
+    fail(`failed to read ${label}: ${error.message}`)
+  }
+}
+
+async function uploadFile({ url, body, contentType, serviceKey, label }) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      'Content-Type': contentType,
+      'x-upsert': 'true',
+    },
+    body,
+  })
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '')
+    fail(`${label} failed (${response.status}): ${errorBody}`)
+  }
+
+  return response
+}
+
+const supabaseUrl = normalizeUrl(process.env.SUPABASE_URL)
+const serviceKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim()
 const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'game-packages'
 const metadataPath = process.env.ARCADE_SHELL_METADATA_PATH || 'arcade-shell/latest.json'
+const shellId = process.env.ARCADE_SHELL_ID || 'arcade-shell'
 const version =
   process.env.ARCADESHELL_VERSION ||
   (() => {
     const result = spawnSync('git', ['describe', '--tags', '--always', '--dirty'], {
       encoding: 'utf8',
     })
-    if (result.status !== 0)
-      return fail('unable to determine version via git describe', result.status)
+
+    if (result.status !== 0) {
+      fail('unable to determine version via git describe', result.status || 1)
+    }
+
     return result.stdout.trim()
   })()
 
 if (!supabaseUrl) fail('SUPABASE_URL is required')
 if (!serviceKey) fail('SUPABASE_SERVICE_ROLE_KEY is required')
+if (!version) fail('ARCADESHELL_VERSION is required')
 
 const env = {
   ...process.env,
   ARCADESHELL_VERSION: version,
 }
 
-const packageCmd = spawnSync('bash', ['scripts/package-arcade-shell.sh'], {
-  stdio: 'inherit',
-  env,
-})
+run('bash', ['scripts/package-arcade-shell.sh'], env)
+run('node', ['scripts/encrypt-arcade-shell.mjs'], env)
 
-if (packageCmd.status !== 0) {
-  fail('package-arcade-shell failed', packageCmd.status || 1)
+const packagedReleaseDir = path.resolve(`dist-package/${shellId}/${version}/release`)
+const packagedBundlePath = path.join(packagedReleaseDir, 'apps', 'service', 'input.bundle.cjs')
+const packagedUiDistDir = path.join(packagedReleaseDir, 'apps', 'ui', 'dist')
+const packagedUiBuildMetadataPath = path.join(packagedUiDistDir, 'arcade-shell-build.json')
+
+if (!fs.existsSync(packagedBundlePath)) {
+  fail(`missing packaged service bundle: ${packagedBundlePath}`)
 }
 
-const encryptCmd = spawnSync('node', ['scripts/encrypt-arcade-shell.mjs'], {
-  stdio: 'inherit',
-  env,
-})
-
-if (encryptCmd.status !== 0) {
-  fail('encrypt-arcade-shell failed', encryptCmd.status || 1)
+if (!fs.existsSync(packagedUiDistDir)) {
+  fail(`missing packaged UI dist: ${packagedUiDistDir}`)
 }
 
-const releaseDir = path.resolve(`dist-package/encrypted/arcade-shell/${version}`)
-const encName = `arcade-shell-${version}.enc`
-const encPath = path.join(releaseDir, encName)
-const manifestPath = path.join(releaseDir, 'manifest.enc.json')
+if (!fs.existsSync(packagedUiBuildMetadataPath)) {
+  fail(`missing packaged UI build metadata: ${packagedUiBuildMetadataPath}`)
+}
+
+const encryptedReleaseDir = path.resolve(`dist-package/encrypted/${shellId}/${version}`)
+const encName = `${shellId}-${version}.enc`
+const encPath = path.join(encryptedReleaseDir, encName)
+const manifestPath = path.join(encryptedReleaseDir, 'manifest.enc.json')
 
 if (!fs.existsSync(encPath)) {
-  fail(`Encrypted package not found: ${encPath}`)
+  fail(`encrypted package not found: ${encPath}`)
 }
 
 if (!fs.existsSync(manifestPath)) {
-  fail(`Manifest not found: ${manifestPath}`)
+  fail(`manifest not found: ${manifestPath}`)
 }
 
-const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-const checksum = manifest.encrypted?.sha256
+const manifest = readJson(manifestPath, 'encrypted manifest')
+const checksum = String(manifest?.encrypted?.sha256 || '').trim()
 
 if (!checksum) {
-  fail('Encrypted manifest missing checksum')
+  fail('encrypted manifest missing checksum')
 }
 
-const objectPath = `arcade-shell/${version}/${encName}`
+const objectPath = `${shellId}/${version}/${encName}`
 const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${objectPath}`
 
+console.log(`[publish-arcade-shell] verified service bundle: ${packagedBundlePath}`)
+console.log(`[publish-arcade-shell] verified UI dist: ${packagedUiDistDir}`)
+console.log(`[publish-arcade-shell] verified UI build metadata: ${packagedUiBuildMetadataPath}`)
 console.log(`[publish-arcade-shell] uploading ${encName} to ${uploadUrl}`)
-const uploadRes = await fetch(uploadUrl, {
-  method: 'POST',
-  headers: {
-    apikey: serviceKey,
-    Authorization: `Bearer ${serviceKey}`,
-    'Content-Type': 'application/octet-stream',
-    'x-upsert': 'true',
-  },
-  body: fs.readFileSync(encPath),
-})
 
-if (!uploadRes.ok) {
-  const body = await uploadRes.text()
-  fail(`storage upload failed (${uploadRes.status}): ${body}`)
-}
+await uploadFile({
+  url: uploadUrl,
+  body: fs.readFileSync(encPath),
+  contentType: 'application/octet-stream',
+  serviceKey,
+  label: 'storage upload',
+})
 
 const publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${objectPath}`
 const metadata = {
@@ -96,29 +148,29 @@ const metadata = {
   checksum,
   published_at: new Date().toISOString(),
   notes: process.env.ARCADE_SHELL_RELEASE_NOTES || null,
+  runtime: {
+    service_bundle: 'apps/service/input.bundle.cjs',
+    ui_dist: 'apps/ui/dist',
+    ui_build_metadata: 'apps/ui/dist/arcade-shell-build.json',
+  },
 }
 
 const metadataJson = JSON.stringify(metadata, null, 2)
-fs.writeFileSync(path.join(releaseDir, 'metadata.json'), metadataJson)
+const localMetadataPath = path.join(encryptedReleaseDir, 'metadata.json')
+fs.writeFileSync(localMetadataPath, metadataJson)
 
 const metadataUploadUrl = `${supabaseUrl}/storage/v1/object/${bucket}/${metadataPath}`
 console.log(`[publish-arcade-shell] updating metadata at ${metadataUploadUrl}`)
-const metadataRes = await fetch(metadataUploadUrl, {
-  method: 'POST',
-  headers: {
-    apikey: serviceKey,
-    Authorization: `Bearer ${serviceKey}`,
-    'Content-Type': 'application/json',
-    'x-upsert': 'true',
-  },
-  body: metadataJson,
-})
 
-if (!metadataRes.ok) {
-  const body = await metadataRes.text()
-  fail(`metadata upload failed (${metadataRes.status}): ${body}`)
-}
+await uploadFile({
+  url: metadataUploadUrl,
+  body: metadataJson,
+  contentType: 'application/json',
+  serviceKey,
+  label: 'metadata upload',
+})
 
 console.log(`[publish-arcade-shell] published version ${version}`)
 console.log(`[publish-arcade-shell] package url: ${publicUrl}`)
 console.log(`[publish-arcade-shell] checksum: ${checksum}`)
+console.log(`[publish-arcade-shell] metadata file: ${localMetadataPath}`)

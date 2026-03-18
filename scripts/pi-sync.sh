@@ -126,14 +126,14 @@ if [[ "$PI_BUILD_INPUT" == "1" ]]; then
     exit 1
   fi
 
- "$ESBUILD_BIN" \
-   "$LOCAL_INPUT_ENTRY" \
-   --bundle \
-   --platform=node \
-   --target=node20 \
-   --format=cjs \
-   --minify \
-   --outfile="$LOCAL_INPUT_BUNDLE"
+  "$ESBUILD_BIN" \
+    "$LOCAL_INPUT_ENTRY" \
+    --bundle \
+    --platform=node \
+    --target=node20 \
+    --format=cjs \
+    --minify \
+    --outfile="$LOCAL_INPUT_BUNDLE"
 fi
 
 if [[ "$PI_BUILD_UINPUT_HELPER" == "1" ]]; then

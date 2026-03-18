@@ -1652,7 +1652,7 @@ function handleRetroarchMenuExitIntent() {
 
   if (retroarchStopping) {
     console.warn('[LAUNCH] Ignored — RetroArch stopping')
-    return res.end('Stopping')
+    return true
   }
 
   if (!canAcceptRetroarchStop()) {
