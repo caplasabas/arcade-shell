@@ -57,7 +57,7 @@ export function subscribeToDeviceBalance(deviceId: string, onChange: (balance: n
           filter: `device_id=eq.${deviceId}`,
         },
         payload => {
-          onChange(payload.new.balance)
+          onChange(Number(payload.new.balance ?? 0))
         },
       )
       .subscribe(status => {

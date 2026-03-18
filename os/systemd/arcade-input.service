@@ -8,25 +8,28 @@ StartLimitIntervalSec=60
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/arcade1/arcade/apps/service
-EnvironmentFile=-/home/arcade1/arcade/.env.arcade-service
+WorkingDirectory=/opt/arcade/service
+EnvironmentFile=-/opt/arcade/os/.env.arcade-service
 
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/arcade1/.Xauthority
 Environment=GAME_PACKAGE_KEY_HEX=e93e36263af461dd686403aa98b20a1e084818359af81258fdb9b17828940620
 Environment=ARCADE_RUNTIME_GAMES_DIR=/dev/shm/arcade-games
+Environment=ARCADE_RUNTIME_DIR=/opt/arcade
+Environment=ARCADE_UI_DIST_DIR=/opt/arcade/ui/dist
+Environment=UINPUT_HELPER_PATH=/opt/arcade/bin/uinput-helper
 
 Environment=RETROARCH_TTY_MODE=1
 Environment=RETROARCH_SINGLE_X=0
 Environment=RETROARCH_RUN_USER=arcade1
 Environment=RETROARCH_RUN_UID=1000
 Environment=RETROARCH_RUN_HOME=/home/arcade1
-Environment=RETROARCH_XDG_RUNTIME_DIR=/run/user/1000
-Environment=RETROARCH_DBUS_ADDRESS=unix:path=/run/user/1000/bus
-Environment=RETROARCH_PULSE_SERVER=unix:/run/user/1000/pulse/native
+Environment=RETROARCH_XDG_RUNTIME_DIR=/run/arcade1
+Environment=RETROARCH_DBUS_ADDRESS=
+Environment=RETROARCH_PULSE_SERVER=
 
 Environment=RETROARCH_PRIMARY_INPUT=P1
-Environment=RETROARCH_CONFIG_PATH=/home/arcade1/arcade/os/retroarch.cfg
+Environment=RETROARCH_CONFIG_PATH=/opt/arcade/os/retroarch.cfg
 Environment=CASINO_MENU_EXITS_RETROARCH=1
 Environment=ARCADE_RESTART_UI_ON_GAME_EXIT=0
 Environment=ARCADE_LIFE_DEDUCT_MODE=unlock_once
@@ -43,7 +46,7 @@ Environment=ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS=1200
 Environment=ARCADE_RETRO_OSD_PROMPT_BLINK=0
 Environment=ARCADE_LIFE_BALANCE_SYNC_INTERVAL_MS=1000
 
-ExecStart=/usr/bin/node input.js
+ExecStart=/usr/bin/node /opt/arcade/service/input.bundle.js
 Restart=always
 RestartSec=3
 StandardOutput=journal

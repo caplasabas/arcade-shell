@@ -8,13 +8,14 @@ import { exitGame, isGameRunning, launchGame } from './lib/gameLoader'
 import { fetchDeviceBalance, subscribeToDeviceBalance } from './lib/balance'
 import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './lib/games'
 import { WithdrawModal } from './components/WithdrawModal'
-import { ExitConfirmModal, type ExitConfirmContext } from './components/ExitConfirmModal'
+import { type ExitConfirmContext, ExitConfirmModal } from './components/ExitConfirmModal'
 
 import { ensureDeviceRegistered } from './lib/device'
 import { flushMetricEvents, queueMetricEvent } from './lib/metrics'
 import { supabase } from './lib/supabase'
 
 import { formatPeso } from './utils'
+import bootImage from './assets/boot.png'
 
 export type GameType = 'arcade' | 'casino'
 
@@ -60,8 +61,12 @@ type ArcadeLifeOverlayState = {
 function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
   const id = Number(raw?.id ?? 0)
   const device_id = String(raw?.device_id ?? '').trim()
-  const command = String(raw?.command ?? '').trim().toLowerCase()
-  const status = String(raw?.status ?? '').trim().toLowerCase()
+  const command = String(raw?.command ?? '')
+    .trim()
+    .toLowerCase()
+  const status = String(raw?.status ?? '')
+    .trim()
+    .toLowerCase()
 
   if (!Number.isFinite(id) || id <= 0) return null
   if (!device_id) return null
@@ -150,6 +155,11 @@ export default function App() {
       window.clearInterval(interval)
     }
   }, [])
+
+  const balanceRef = useRef(balance)
+  useEffect(() => {
+    balanceRef.current = balance
+  }, [balance])
 
   const networkStageRef = useRef(networkStage)
 
@@ -598,6 +608,25 @@ export default function App() {
       void supabase.removeChannel(channel)
     }
   }, [deviceId, initialized, processAdminCommand])
+
+  useEffect(() => {
+    if (!initialized) return
+    if (networkStage !== 'ok') return
+
+    const timer = window.setTimeout(() => {
+      console.log('[UI BALANCE PUSH]', balance)
+
+      fetch('http://127.0.0.1:5174/arcade-life/balance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ balance }),
+      }).catch(err => {
+        console.error('[UI BALANCE PUSH] failed', err)
+      })
+    }, 80)
+
+    return () => window.clearTimeout(timer)
+  }, [balance, initialized, networkStage])
 
   const addBalance = (source = 'coin', amount = 5) => {
     const id = deviceIdRef.current
@@ -1277,6 +1306,7 @@ export default function App() {
           price: game.price,
           core: game.emulator_core,
           rom: game.rom_path,
+          balance: balanceRef.current,
         }),
       })
 
@@ -1355,7 +1385,33 @@ export default function App() {
   if (((!initialized || loading) && networkStage === 'ok') || networkStage === 'boot') {
     return (
       <div className="boot-loading">
-        <div className="boot-loading-content">
+        <img
+          src={bootImage}
+          alt="Boot"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.45)',
+          }}
+        />
+        <div
+          className="boot-loading-content"
+          style={{
+            position: 'relative',
+            zIndex: 1,
+          }}
+        >
           <div className="boot-spinner" />
           <div className="boot-text">Initializing...</div>
         </div>
@@ -1389,7 +1445,33 @@ export default function App() {
     <div>
       {casinoPreparing && (
         <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99998 }}>
-          <div className="boot-loading-content">
+          <img
+            src={bootImage}
+            alt="Boot"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              pointerEvents: 'none',
+              userSelect: 'none',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'rgba(0, 0, 0, 0.45)',
+            }}
+          />
+          <div
+            className="boot-loading-content"
+            style={{
+              position: 'relative',
+              zIndex: 1,
+            }}
+          >
             <div className="boot-spinner" />
             <div className="boot-text">Loading Game Package...</div>
           </div>
@@ -1456,23 +1538,23 @@ export default function App() {
       )}
 
       <GameGrid balance={balance} games={pageGames} focusedIndex={focus} page={page} />
-      {!runningCasino && runningGame?.type === 'arcade' && arcadeLifeOverlay.active && (
-        <div className="arcade-life-overlay">
-          <div className="arcade-life-title">{arcadeLifeOverlay.gameName ?? 'Arcade'}</div>
-          <div className="arcade-life-subtitle">
-            PRESS START TO BUY LIFE ({formatPeso(arcadeLifeOverlay.pricePerLife)})
-          </div>
-          <div className="arcade-life-status">
-            P1 {arcadeLifeOverlay.p1Unlocked ? 'READY' : 'LOCKED'} | P2{' '}
-            {arcadeLifeOverlay.p2Unlocked ? 'READY' : 'LOCKED'}
-          </div>
-          {arcadeLifeOverlay.balance !== null && (
-            <div className="balance-display arcade-life-balance-display">
-              Balance <span className="balance-amount">{formatPeso(arcadeLifeOverlay.balance)}</span>
-            </div>
-          )}
-        </div>
-      )}
+      {/*{!runningCasino && runningGame?.type === 'arcade' && arcadeLifeOverlay.active && (*/}
+      {/*  <div className="arcade-life-overlay">*/}
+      {/*    <div className="arcade-life-title">{arcadeLifeOverlay.gameName ?? 'Arcade'}</div>*/}
+      {/*    <div className="arcade-life-subtitle">*/}
+      {/*      PRESS START TO BUY LIFE ({formatPeso(arcadeLifeOverlay.pricePerLife)})*/}
+      {/*    </div>*/}
+      {/*    <div className="arcade-life-status">*/}
+      {/*      P1 {arcadeLifeOverlay.p1Unlocked ? 'READY' : 'LOCKED'} | P2{' '}*/}
+      {/*      {arcadeLifeOverlay.p2Unlocked ? 'READY' : 'LOCKED'}*/}
+      {/*    </div>*/}
+      {/*    {arcadeLifeOverlay.balance !== null && (*/}
+      {/*      <div className="balance-display arcade-life-balance-display">*/}
+      {/*        Balance <span className="balance-amount">{formatPeso(arcadeLifeOverlay.balance)}</span>*/}
+      {/*      </div>*/}
+      {/*    )}*/}
+      {/*  </div>*/}
+      {/*)}*/}
 
       {!runningCasino && (
         <div className="overlay-hud">

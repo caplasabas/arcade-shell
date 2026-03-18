@@ -6,13 +6,20 @@ Wants=network.target
 [Service]
 User=arcade1
 Group=arcade1
-WorkingDirectory=/home/arcade1
+WorkingDirectory=/opt/arcade/ui
 
 Environment=HOME=/home/arcade1
 Environment=USER=arcade1
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/arcade1/.Xauthority
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+RuntimeDirectory=arcade1
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/arcade1
+Environment=ARCADE_UI_DIST_DIR=/opt/arcade/ui/dist
+Environment=ARCADE_RUNTIME_DIR=/opt/arcade
+
+Environment=ALSA_CARD=Device
+Environment=ALSA_CTL_CARD=Device
 
 TTYPath=/dev/tty2
 StandardInput=tty
@@ -22,9 +29,12 @@ TTYReset=yes
 TTYVHangup=yes
 TTYVTDisallocate=yes
 
+ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do aplay -L 2>/dev/null | grep -q "plughw:CARD=Device,DEV=0" && exit 0; echo "[AUDIO] waiting for USB sound card"; sleep 1; done; echo "[AUDIO] USB sound card not ready" >&2; exit 1'
+ExecStartPre=/bin/sh -lc 'amixer -c Device sset Speaker 75% unmute >/dev/null 2>&1 || amixer -c Device sset PCM 75% unmute >/dev/null 2>&1 || amixer -c Device sset Master 75% unmute >/dev/null 2>&1 || true'
+
 ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp
 Restart=always
-RestartSec=2
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
