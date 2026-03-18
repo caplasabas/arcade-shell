@@ -217,7 +217,7 @@ const ARCADE_LIFE_START_CONFIRM_WINDOW_MS = parseNonNegativeMs(
   process.env.ARCADE_LIFE_START_CONFIRM_WINDOW_MS,
   2500,
 )
-const ARCADE_LIFE_CREDIT_TTL_MS = parseNonNegativeMs(process.env.ARCADE_LIFE_CREDIT_TTL_MS, 120000)
+const ARCADE_LIFE_CREDIT_TTL_MS = parseNonNegativeMs(process.env.ARCADE_LIFE_CREDIT_TTL_MS, 300000)
 const ARCADE_LIFE_FAIL_OPEN = process.env.ARCADE_LIFE_FAIL_OPEN === '1'
 const ARCADE_RETRO_OSD_ENABLED = process.env.ARCADE_RETRO_OSD !== '0'
 const RETROARCH_NETCMD_HOST = process.env.RETROARCH_NETCMD_HOST || '127.0.0.1'
@@ -533,6 +533,45 @@ function toMoney(value, fallback = 0) {
   return Math.max(0, Math.round(parsed * 100) / 100)
 }
 
+function formatPeso(
+  amount,
+  withSymbol = false,
+  withDecimal = true,
+  decimalCount = 2,
+  abbreviate = false,
+) {
+  const num = Number(amount)
+  if (isNaN(num)) return withSymbol ? '$0' : '0'
+
+  const sign = num < 0 ? '-' : ''
+  const abs = Math.abs(num)
+
+  let value
+
+  if (abbreviate) {
+    if (abs >= 1_000_000_000) {
+      const v = Math.floor((abs / 1_000_000_000) * 100) / 100
+      value = v.toString().replace(/\.00$/, '') + 'B'
+    } else if (abs >= 1_000_000) {
+      const v = Math.floor((abs / 1_000_000) * 100) / 100
+      value = v.toString().replace(/\.00$/, '') + 'M'
+    } else if (abs >= 10_000) {
+      const v = Math.floor((abs / 1_000) * 100) / 100
+      value = v.toString().replace(/\.00$/, '') + 'K'
+    } else {
+      value = abs.toLocaleString()
+    }
+  } else {
+    value = abs.toFixed(withDecimal ? decimalCount : 2).replace(/\d(?=(\d{3})+\.)/g, '$&,')
+
+    if (withDecimal && decimalCount > 2 && value.endsWith('.00')) {
+      value = value.slice(0, -3)
+    }
+  }
+
+  return `${sign}${withSymbol ? '$' : ''}${value}`
+}
+
 function isStartButton(index) {
   return START_BUTTON_INDEXES.has(index)
 }
@@ -643,7 +682,7 @@ function showArcadeOsdMessage(message, options = {}) {
 
 function formatArcadeBalanceForOsd(rawBalance) {
   if (rawBalance === null || rawBalance === undefined) return '0.00'
-  return toMoney(rawBalance, 0).toFixed(2)
+  return formatPeso(toMoney(rawBalance, 0))
 }
 
 function isArcadePlayerLocked(source) {
@@ -652,7 +691,7 @@ function isArcadePlayerLocked(source) {
   const player = normalizeArcadePlayer(source)
   if (!player) return false
 
-  return !arcadeSession.playerUnlocked?.[player]
+  return !playerHasStoredCredit(player)
 }
 
 function isAllowedLockedInput(index) {
@@ -688,9 +727,12 @@ function composeArcadeOsdOverlay(message, balanceOverride = null, options = null
     const p2ConfirmArmed = Number(arcadeSession.startConfirmUntil?.P2 || 0) > now
     const exitConfirmArmed = Number(retroarchExitConfirmUntil || 0) > now
 
-    const leftBase = p1Ready ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+    const p1HasCredit = Number(arcadeSession.playerLivesPurchased?.P1 || 0) > 0
+    const p2HasCredit = Number(arcadeSession.playerLivesPurchased?.P2 || 0) > 0
+
+    const leftBase = p1HasCredit ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
     const centerBase = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
-    const rightBase = p2Ready ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+    const rightBase = p2HasCredit ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
 
     const leftText = arcadeOverlayNotice?.slot === 'left' ? arcadeOverlayNotice.text : leftBase
     const centerText =
@@ -763,6 +805,26 @@ function clearArcadeContinueCountdown(player = null) {
   }
 }
 
+function releaseAllVirtualInputsForPlayer(player) {
+  const target = player === 'P1' ? virtualP1 : player === 'P2' ? virtualP2 : null
+  if (!target) return
+
+  sendVirtual(target, EV_KEY, BTN_SOUTH, 0)
+  sendVirtual(target, EV_KEY, BTN_EAST, 0)
+  sendVirtual(target, EV_KEY, BTN_NORTH, 0)
+  sendVirtual(target, EV_KEY, BTN_WEST, 0)
+  sendVirtual(target, EV_KEY, BTN_TL, 0)
+  sendVirtual(target, EV_KEY, BTN_TR, 0)
+  sendVirtual(target, EV_KEY, BTN_SELECT, 0)
+  sendVirtual(target, EV_KEY, BTN_START, 0)
+  sendVirtual(target, EV_KEY, BTN_DPAD_UP, 0)
+  sendVirtual(target, EV_KEY, BTN_DPAD_DOWN, 0)
+  sendVirtual(target, EV_KEY, BTN_DPAD_LEFT, 0)
+  sendVirtual(target, EV_KEY, BTN_DPAD_RIGHT, 0)
+
+  dpadState[player] = { up: false, down: false, left: false, right: false }
+}
+
 function clearArcadeCreditExpiry(player = null) {
   const players =
     player && arcadeCreditExpiryTimers[player] !== undefined
@@ -777,26 +839,10 @@ function clearArcadeCreditExpiry(player = null) {
   }
 }
 
-function scheduleArcadeCreditExpiry(player) {
-  if (!arcadeSession?.active) return
-  if (player !== 'P1' && player !== 'P2') return
-
-  clearArcadeCreditExpiry(player)
-
-  if (ARCADE_LIFE_CREDIT_TTL_MS <= 0) return
-
-  arcadeCreditExpiryTimers[player] = setTimeout(() => {
-    if (!arcadeSession?.active) return
-    if (!arcadeSession.playerUnlocked?.[player]) return
-
-    arcadeSession.playerUnlocked[player] = false
-    arcadeSession.playerLivesPurchased[player] = 0
-    arcadeSession.startConfirmUntil[player] = 0
-    arcadeCreditExpiryTimers[player] = null
-
-    showArcadeOsdMessage(composeArcadeOsdOverlay('PRESS [START]'), { bypassCooldown: true })
-    broadcastArcadeLifeState('credit_expired', { player, ttlMs: ARCADE_LIFE_CREDIT_TTL_MS })
-  }, ARCADE_LIFE_CREDIT_TTL_MS)
+function playerHasStoredCredit(player) {
+  if (!arcadeSession?.active) return false
+  if (player !== 'P1' && player !== 'P2') return false
+  return Number(arcadeSession.playerLivesPurchased?.[player] || 0) > 0
 }
 
 function clearArcadePromptLoop() {
@@ -810,15 +856,16 @@ function clearArcadePromptLoop() {
 function buildArcadePromptMessage() {
   if (!arcadeSession?.active) return ''
 
-  const lockedP1 = !arcadeSession.playerUnlocked?.P1
-  const lockedP2 = !arcadeSession.playerUnlocked?.P2
+  const p1HasCredit = playerHasStoredCredit('P1')
+  const p2HasCredit = playerHasStoredCredit('P2')
 
-  const waitingP1 = lockedP1 && !arcadeContinueCountdownTimers.P1
-  const waitingP2 = lockedP2 && !arcadeContinueCountdownTimers.P2
+  const waitingP1 = !p1HasCredit && !arcadeContinueCountdownTimers.P1
+  const waitingP2 = !p2HasCredit && !arcadeContinueCountdownTimers.P2
 
   if (waitingP1 || waitingP2) {
     const priceText = getArcadeSessionPrice().toFixed(2)
     const actionLabel = getArcadeLifePromptActionLabel()
+
     if (waitingP1 && waitingP2) {
       return composeArcadeOsdOverlay(`PRESS ${actionLabel} TO PLAY (P${priceText}/CREDIT)`)
     }
@@ -828,13 +875,14 @@ function buildArcadePromptMessage() {
     return composeArcadeOsdOverlay(`P2 PRESS ${actionLabel} (P${priceText})`)
   }
 
-  if (lockedP1 || lockedP2) {
+  if (!p1HasCredit || !p2HasCredit) {
     const priceText = getArcadeSessionPrice().toFixed(2)
     const actionLabel = getArcadeLifePromptActionLabel()
-    if (lockedP1 && lockedP2) {
+
+    if (!p1HasCredit && !p2HasCredit) {
       return composeArcadeOsdOverlay(`LOCKED | PRESS ${actionLabel} (P${priceText}/CREDIT)`)
     }
-    if (lockedP1) {
+    if (!p1HasCredit) {
       return composeArcadeOsdOverlay(`P1 LOCKED | PRESS ${actionLabel} (P${priceText})`)
     }
     return composeArcadeOsdOverlay(`P2 LOCKED | PRESS ${actionLabel} (P${priceText})`)
@@ -891,13 +939,15 @@ function startArcadeContinueCountdown(player) {
       clearArcadeContinueCountdown(player)
       return
     }
-    if (arcadeSession.playerUnlocked?.[player]) {
+
+    if (playerHasStoredCredit(player)) {
       clearArcadeContinueCountdown(player)
       return
     }
 
     const priceText = getArcadeSessionPrice().toFixed(2)
     const actionLabel = getArcadeLifePromptActionLabel()
+
     showArcadeOsdMessage(
       composeArcadeOsdOverlay(`P${playerIndex} PRESS ${actionLabel} (P${priceText})`, null, {
         continueSeconds: remaining,
@@ -934,8 +984,8 @@ function broadcastArcadeLifeState(status = 'state', extra = {}) {
     gameId: arcadeSession.gameId,
     gameName: arcadeSession.gameName,
     pricePerLife: arcadeSession.pricePerLife,
-    p1Unlocked: Boolean(arcadeSession.playerUnlocked?.P1),
-    p2Unlocked: Boolean(arcadeSession.playerUnlocked?.P2),
+    p1Unlocked: playerHasStoredCredit('P1'),
+    p2Unlocked: playerHasStoredCredit('P2'),
     p1LivesPurchased: Number(arcadeSession.playerLivesPurchased?.P1 || 0),
     p2LivesPurchased: Number(arcadeSession.playerLivesPurchased?.P2 || 0),
     balance: arcadeSession.lastKnownBalance,
@@ -1048,7 +1098,7 @@ function startArcadeLifeSession({ gameId, gameName, pricePerLife, initialBalance
   const sessionRef = arcadeSession
   setTimeout(() => {
     if (!arcadeSession?.active || arcadeSession !== sessionRef) return
-    if (arcadeSession.playerUnlocked.P1 || arcadeSession.playerUnlocked.P2) return
+    if (playerHasStoredCredit('P1') || playerHasStoredCredit('P2')) return
     const promptPriceText = getArcadeSessionPrice().toFixed(2)
     const promptActionLabel = getArcadeLifePromptActionLabel()
     showArcadeOsdMessage(
@@ -1230,7 +1280,9 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
   const lastAt = Number(sessionRef.lastChargeAt[player] || 0)
   if (now - lastAt < ARCADE_LIFE_DEDUCT_COOLDOWN_MS) return
 
-  if (ARCADE_LIFE_DEDUCT_MODE === 'unlock_once' && sessionRef.playerUnlocked[player]) {
+  const hasStoredCredit = Number(sessionRef.playerLivesPurchased?.[player] || 0) > 0
+
+  if (ARCADE_LIFE_DEDUCT_MODE === 'unlock_once' && hasStoredCredit) {
     pulseVirtualKey(target, keyCode)
     return
   }
@@ -1246,7 +1298,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
 
       if (result.ok) {
         clearArcadeContinueCountdown(player)
-        sessionRef.playerUnlocked[player] = true
+        sessionRef.startConfirmUntil[player] = 0
         sessionRef.playerLivesPurchased[player] = 1
         scheduleArcadeCreditExpiry(player)
 
@@ -1286,7 +1338,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
       if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
         setTimeout(() => {
           if (!arcadeSession?.active || arcadeSession !== sessionRef) return
-          if (sessionRef.playerUnlocked[player]) return
+          if (Number(sessionRef.playerLivesPurchased?.[player] || 0) > 0) return
           startArcadeContinueCountdown(player)
         }, 1200)
       }
@@ -1909,7 +1961,7 @@ function handleKey(source, index, value) {
 
     if (retroarchActive && arcadeSession?.active) {
       const primaryPlayer = normalizeArcadePlayer(RETROARCH_PRIMARY_INPUT) || 'P1'
-      const primaryLocked = !arcadeSession.playerUnlocked?.[primaryPlayer]
+      const primaryLocked = !playerHasStoredCredit(primaryPlayer)
       const casinoAction = JOYSTICK_BUTTON_MAP[index]
 
       if (primaryLocked) {
@@ -1983,27 +2035,31 @@ function routePlayerInput(source, index, value) {
     const target = getRetroVirtualTarget(source)
     if (!target) return
 
-    if (isArcadePlayerLocked(source) && !isAllowedLockedInput(index)) {
-      if (value === 1) {
-        const player = normalizeArcadePlayer(source)
-        if (player) {
-          const priceText = getArcadeSessionPrice().toFixed(2)
-          const actionLabel = getArcadeLifePromptActionLabel()
-          showArcadeOsdMessage(
-            composeArcadeOsdOverlay(
-              `P${player.slice(1)} LOCKED INPUT ${actionLabel} (P${priceText})`,
-            ),
-          )
+    const player = normalizeArcadePlayer(source)
+    if (!player) return
 
-          if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
-            startArcadeContinueCountdown(player)
-            broadcastArcadeLifeState('locked', {
-              player,
-              continueSeconds: ARCADE_LIFE_CONTINUE_SECONDS,
-            })
-          } else {
-            broadcastArcadeLifeState('locked', { player })
-          }
+    const hasStoredCredit = playerHasStoredCredit(player)
+    const needsCredit = !hasStoredCredit
+
+    if (needsCredit && !isAllowedLockedInput(index)) {
+      if (value === 1) {
+        const priceText = getArcadeSessionPrice().toFixed(2)
+        const actionLabel = getArcadeLifePromptActionLabel()
+
+        showArcadeOsdMessage(
+          composeArcadeOsdOverlay(
+            `P${player.slice(1)} LOCKED INPUT ${actionLabel} (P${priceText})`,
+          ),
+        )
+
+        if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
+          startArcadeContinueCountdown(player)
+          broadcastArcadeLifeState('locked', {
+            player,
+            continueSeconds: ARCADE_LIFE_CONTINUE_SECONDS,
+          })
+        } else {
+          broadcastArcadeLifeState('locked', { player })
         }
       }
       return
@@ -2012,31 +2068,38 @@ function routePlayerInput(source, index, value) {
     if (arcadeSession?.active) {
       const player = normalizeArcadePlayer(source)
       if (!player) return
-      const locked = !arcadeSession.playerUnlocked[player]
+      const hasStoredCredit = playerHasStoredCredit(player)
+      const needsCredit = !hasStoredCredit
 
       if (isLifePurchaseButton(index)) {
         if (value === 1) {
-          if (locked) {
+          const hasStoredCredit = playerHasStoredCredit(player)
+
+          if (!hasStoredCredit) {
             arcadeSession.startConfirmUntil[player] = 0
             requestArcadeLifePurchase(player, target, BTN_START, 'buy_button')
           } else {
-            showArcadeOsdMessage(composeArcadeOsdOverlay(`P${player.slice(1)} ALREADY HAS CREDIT`))
+            showArcadeOsdMessage(
+              composeArcadeOsdOverlay(`P${player.slice(1)} ALREADY HAS CREDIT`),
+              {
+                bypassCooldown: true,
+              },
+            )
           }
         }
-        // Always swallow dedicated purchase button in Arcade Life mode.
         return
       }
 
       if (isStartButton(index)) {
         if (value === 1) {
-          // START interaction cancels any armed MENU exit intent.
           clearRetroarchExitConfirm()
         }
 
-        if (locked) {
+        if (needsCredit) {
           if (value === 1) {
             const now = Date.now()
             const confirmUntil = Number(arcadeSession.startConfirmUntil?.[player] || 0)
+
             if (confirmUntil > now) {
               arcadeSession.startConfirmUntil[player] = 0
               requestArcadeLifePurchase(player, target, keyCode, 'start_button')
@@ -2057,36 +2120,14 @@ function routePlayerInput(source, index, value) {
               })
             }
           }
-          // Locked: START only purchases on second press within confirm window.
           return
         }
 
-        // Unlocked: START behaves as a normal gameplay input.
         arcadeSession.startConfirmUntil[player] = 0
-        clearArcadeOverlayNotice()
-        sendVirtual(target, EV_KEY, keyCode, value)
-        return
-      }
-
-      if (locked) {
-        if (value === 1) {
-          const priceText = getArcadeSessionPrice().toFixed(2)
-          const actionLabel = getArcadeLifePromptActionLabel()
-          showArcadeOsdMessage(
-            composeArcadeOsdOverlay(
-              `P${player.slice(1)} LOCKED INPUT ${actionLabel} (P${priceText})`,
-            ),
-          )
-          if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
-            startArcadeContinueCountdown(player)
-            broadcastArcadeLifeState('locked', {
-              player,
-              continueSeconds: ARCADE_LIFE_CONTINUE_SECONDS,
-            })
-          } else {
-            broadcastArcadeLifeState('locked', { player })
-          }
+        if (arcadeOverlayNotice?.slot === (player === 'P1' ? 'left' : 'right')) {
+          clearArcadeOverlayNotice()
         }
+        sendVirtual(target, EV_KEY, keyCode, value)
         return
       }
     }
@@ -2159,12 +2200,57 @@ function scheduleForceSwitchToUI(reason, delayMs = 900) {
 
   const targetUiVT = getTargetUiVT()
   const waitMs = Math.max(0, Math.round(delayMs))
+
   pendingUiFallbackTimer = setTimeout(() => {
     pendingUiFallbackTimer = null
     switchToVTWithRetry(targetUiVT, `${reason}-timer`)
     setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-timer-post`), 300)
   }, waitMs)
+
   console.log(`[VT] scheduled fallback to ${targetUiVT} (${reason})`)
+}
+
+function scheduleArcadeCreditExpiry(player) {
+  if (!arcadeSession?.active) return
+  if (player !== 'P1' && player !== 'P2') return
+
+  clearArcadeCreditExpiry(player)
+
+  if (ARCADE_LIFE_CREDIT_TTL_MS <= 0) return
+
+  arcadeCreditExpiryTimers[player] = setTimeout(() => {
+    if (!arcadeSession?.active) return
+
+    arcadeSession.playerLivesPurchased[player] = 0
+    arcadeSession.startConfirmUntil[player] = 0
+    releaseAllVirtualInputsForPlayer(player)
+    arcadeCreditExpiryTimers[player] = null
+
+    if (
+      arcadeOverlayNotice?.slot === (player === 'P1' ? 'left' : 'right') ||
+      arcadeOverlayNotice?.text === 'START GAME?'
+    ) {
+      clearArcadeOverlayNotice()
+    }
+
+    showArcadeOsdMessage(composeArcadeOsdOverlay(`P${player.slice(1)} CREDIT CONSUMED`), {
+      bypassCooldown: true,
+    })
+
+    setTimeout(() => {
+      if (!arcadeSession?.active) return
+      if (playerHasStoredCredit(player)) return
+
+      showArcadeOsdMessage(composeArcadeOsdOverlay(''), {
+        bypassCooldown: true,
+      })
+    }, 700)
+
+    broadcastArcadeLifeState('credit_consumed', {
+      player,
+      ttlMs: ARCADE_LIFE_CREDIT_TTL_MS,
+    })
+  }, ARCADE_LIFE_CREDIT_TTL_MS)
 }
 
 function clearScheduledForceSwitchToUI() {

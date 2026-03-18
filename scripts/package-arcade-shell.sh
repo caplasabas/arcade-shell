@@ -80,7 +80,7 @@ fi
 
 echo "[package-arcade-shell] exporting workspace"
 EXCLUDE_ARGS=(
-  --exclude roms/
+#  --exclude roms/
   --exclude backup/
   --exclude dist-package/
   --exclude .git/

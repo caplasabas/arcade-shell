@@ -30,7 +30,7 @@ TTYVHangup=yes
 TTYVTDisallocate=yes
 
 ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do aplay -L 2>/dev/null | grep -q "plughw:CARD=Device,DEV=0" && exit 0; echo "[AUDIO] waiting for USB sound card"; sleep 1; done; echo "[AUDIO] USB sound card not ready" >&2; exit 1'
-ExecStartPre=/bin/sh -lc 'amixer -c Device sset Speaker 75% unmute >/dev/null 2>&1 || amixer -c Device sset PCM 75% unmute >/dev/null 2>&1 || amixer -c Device sset Master 75% unmute >/dev/null 2>&1 || true'
+ExecStartPre=/bin/sh -lc 'amixer -c Device sset Speaker 100% unmute >/dev/null 2>&1 || amixer -c Device sset PCM 100% unmute >/dev/null 2>&1 || amixer -c Device sset Master 100% unmute >/dev/null 2>&1 || true'
 
 ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp
 Restart=always
