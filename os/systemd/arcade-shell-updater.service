@@ -1,8 +1,7 @@
 [Unit]
 Description=Arcade Shell Auto Updater
-After=network-online.target
+After=arcade-ui.service network-online.target
 Wants=network-online.target
-Before=arcade-input.service arcade-ui.service
 
 [Service]
 Type=oneshot
@@ -13,12 +12,16 @@ Environment=ARCADE_SHELL_INSTALL_DIR=/opt/arcade
 Environment=ARCADE_SHELL_VERSION_FILE=/opt/arcade/os/.arcade-shell-version
 Environment=ARCADE_SHELL_UPDATER_DEST=/usr/local/bin/arcade-shell-updater.mjs
 Environment=ARCADE_SHELL_SYSTEMD_DIR=/etc/systemd/system
+Environment=ARCADE_SHELL_NETWORK_TIMEOUT_MS=2500
+Environment=ARCADE_SHELL_REBOOT_ON_UPDATE=0
 Environment=SUPABASE_URL=https://rrdnfvbyfjvowiqpgsax.supabase.co
 Environment=SUPABASE_SERVICE_ROLE_KEY=sb_secret_AjqnokH2mHl_BenbbVHIEQ_zWzqNVWS
 Environment=GAME_PACKAGE_KEY_HEX=e93e36263af461dd686403aa98b20a1e084818359af81258fdb9b17828940620
 ExecStart=/usr/local/bin/arcade-shell-updater.mjs
-TimeoutStartSec=180
+TimeoutStartSec=8
 StandardOutput=journal
+
+
 StandardError=journal
 
 [Install]

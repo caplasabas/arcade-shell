@@ -5,7 +5,13 @@ type ArcadeShellBuildInfo = {
   created_at?: string
 }
 
-export function ArcadeShellVersionBadge() {
+type Props = {
+  deviceId?: string | null
+  ethernetIp?: string | null
+  wifiIp?: string | null
+}
+
+export function ArcadeShellVersionBadge({ deviceId, ethernetIp, wifiIp }: Props) {
   const [version, setVersion] = useState<string>('')
 
   useEffect(() => {
@@ -32,6 +38,14 @@ export function ArcadeShellVersionBadge() {
 
   if (!version) return null
 
+  const normalizedDeviceId = String(deviceId ?? '')
+    .trim()
+    .slice(0, 12)
+  const ipLabel = ethernetIp?.trim() || wifiIp?.trim() || 'n/a'
+  const label = normalizedDeviceId
+    ? `${normalizedDeviceId} - ${version} ${ipLabel}`
+    : `${version} ${ipLabel}`
+
   return (
     <div
       style={{
@@ -39,15 +53,19 @@ export function ArcadeShellVersionBadge() {
         right: 12,
         bottom: 10,
         fontSize: 12,
-        opacity: 0.75,
+        opacity: 0.9,
         pointerEvents: 'none',
-        zIndex: 9999,
+        zIndex: 100001,
         color: '#fff',
         textShadow: '0 1px 2px rgba(0,0,0,0.85)',
         fontVariantNumeric: 'tabular-nums',
+        background: 'rgba(0, 0, 0, 0.45)',
+        borderRadius: 999,
+        padding: '4px 10px',
+        letterSpacing: '0.03em',
       }}
     >
-      {version}
+      {label}
     </div>
   )
 }

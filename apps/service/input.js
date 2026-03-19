@@ -137,6 +137,19 @@ let pendingUiFallbackTimer = null
 let retroarchExitConfirmUntil = 0
 let retroarchCurrentGameId = null
 let lastExitedGameId = null
+let arcadeShellUpdateChild = null
+let arcadeShellUpdateTriggered = false
+let arcadeShellUpdateState = {
+  status: 'idle',
+  phase: null,
+  label: '',
+  detail: null,
+  startedAt: null,
+  finishedAt: null,
+  message: '',
+  reason: null,
+  exitCode: null,
+}
 
 const GAME_VT = process.env.ARCADE_GAME_VT || '1'
 const UI_VT = process.env.ARCADE_UI_VT || '2'
@@ -227,7 +240,7 @@ const RETROARCH_OSD_COMMAND = String(process.env.RETROARCH_OSD_COMMAND || 'AUTO'
   .toUpperCase()
 const ARCADE_RETRO_OSD_COOLDOWN_MS = parseNonNegativeMs(
   process.env.ARCADE_RETRO_OSD_COOLDOWN_MS,
-  750,
+  250,
 )
 const ARCADE_RETRO_OSD_RETRY_INTERVAL_MS = parseNonNegativeMs(
   process.env.ARCADE_RETRO_OSD_RETRY_INTERVAL_MS,
@@ -241,7 +254,7 @@ const ARCADE_RETRO_OSD_RETRY_COUNT = (() => {
 const ARCADE_RETRO_OSD_PROMPT_PERSIST = process.env.ARCADE_RETRO_OSD_PROMPT_PERSIST !== '0'
 const ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS = parseNonNegativeMs(
   process.env.ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS,
-  1200,
+  400,
 )
 const ARCADE_RETRO_OSD_PROMPT_BLINK = process.env.ARCADE_RETRO_OSD_PROMPT_BLINK === '1'
 const ARCADE_RETRO_OSD_STYLE = (() => {
@@ -401,6 +414,8 @@ const arcadeContinueCountdownTimers = { P1: null, P2: null }
 const arcadeCreditExpiryTimers = { P1: null, P2: null }
 let arcadePromptLoopTimer = null
 let arcadePromptBlinkPhase = false
+let lastArcadePromptLoopMessage = ''
+let lastArcadePromptLoopSentAt = 0
 let arcadeBalanceSyncTimer = null
 let arcadeBalanceSyncInFlight = false
 
@@ -665,7 +680,7 @@ function showArcadeOsdMessage(message, options = {}) {
   lastArcadeOsdAt = now
 
   const osdCommands = (() => {
-    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MESG']
+    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MSG', 'SHOW_MESG']
     if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG']
     if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG']
     return [RETROARCH_OSD_COMMAND]
@@ -851,6 +866,8 @@ function clearArcadePromptLoop() {
     arcadePromptLoopTimer = null
   }
   arcadePromptBlinkPhase = false
+  lastArcadePromptLoopMessage = ''
+  lastArcadePromptLoopSentAt = 0
 }
 
 function buildArcadePromptMessage() {
@@ -894,6 +911,7 @@ function buildArcadePromptMessage() {
 function scheduleArcadePromptLoop() {
   clearArcadePromptLoop()
   if (!ARCADE_RETRO_OSD_PROMPT_PERSIST) return
+  const HEARTBEAT_MS = 2200
 
   const tick = () => {
     if (!arcadeSession?.active) {
@@ -912,10 +930,20 @@ function scheduleArcadePromptLoop() {
           showArcadeOsdMessage('', { allowBlank: true, bypassCooldown: true })
         }
       } else {
-        showArcadeOsdMessage(promptMessage, { bypassCooldown: true })
+        const now = Date.now()
+        const changed = promptMessage !== lastArcadePromptLoopMessage
+        const heartbeatDue = now - lastArcadePromptLoopSentAt >= HEARTBEAT_MS
+
+        if (changed || heartbeatDue) {
+          showArcadeOsdMessage(promptMessage, { bypassCooldown: changed })
+          lastArcadePromptLoopMessage = promptMessage
+          lastArcadePromptLoopSentAt = now
+        }
       }
     } else {
       arcadePromptBlinkPhase = false
+      lastArcadePromptLoopMessage = ''
+      lastArcadePromptLoopSentAt = 0
     }
 
     arcadePromptLoopTimer = setTimeout(tick, ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS)
@@ -1106,8 +1134,8 @@ function startArcadeLifeSession({ gameId, gameName, pricePerLife, initialBalance
     )
   }, 2000)
   scheduleArcadePromptLoop()
-  // scheduleArcadeBalanceSyncLoop()
-  // syncArcadeSessionBalance({ forceBroadcast: true })
+  scheduleArcadeBalanceSyncLoop()
+  syncArcadeSessionBalance({ forceBroadcast: true })
 }
 
 function clearArcadeLifeSession(reason = 'ended') {
@@ -1627,6 +1655,129 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+function getArcadeShellUpdateStatus() {
+  return {
+    ...arcadeShellUpdateState,
+    running: Boolean(arcadeShellUpdateChild),
+    triggered: arcadeShellUpdateTriggered,
+  }
+}
+
+function setArcadeShellUpdateState(patch) {
+  arcadeShellUpdateState = {
+    ...arcadeShellUpdateState,
+    ...patch,
+  }
+}
+
+function triggerArcadeShellUpdate(reason = 'manual') {
+  if (arcadeShellUpdateChild) {
+    return { started: false, alreadyRunning: true, status: getArcadeShellUpdateStatus() }
+  }
+
+  if (arcadeShellUpdateTriggered) {
+    return { started: false, alreadyTriggered: true, status: getArcadeShellUpdateStatus() }
+  }
+
+  const updaterPath =
+    process.env.ARCADE_SHELL_UPDATER_BIN || '/usr/local/bin/arcade-shell-updater.mjs'
+
+  if (!fs.existsSync(updaterPath)) {
+    setArcadeShellUpdateState({
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      message: `missing updater: ${updaterPath}`,
+      reason,
+      exitCode: null,
+    })
+    return { started: false, missingUpdater: true, status: getArcadeShellUpdateStatus() }
+  }
+
+  arcadeShellUpdateTriggered = true
+  setArcadeShellUpdateState({
+    status: 'running',
+    phase: 'shell-check',
+    label: 'Checking for updates',
+    detail: null,
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    message: '[arcade-shell-updater] starting',
+    reason,
+    exitCode: null,
+  })
+
+  const child = spawn(updaterPath, ['--manual'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env,
+  })
+
+  arcadeShellUpdateChild = child
+
+  const handleOutput = chunk => {
+    const statusPrefix = '[arcade-shell-updater:status] '
+    const lines = String(chunk || '')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+    if (lines.length === 0) return
+
+    for (const line of lines) {
+      if (line.startsWith(statusPrefix)) {
+        try {
+          const payload = JSON.parse(line.slice(statusPrefix.length))
+          const nextState = {}
+
+          if (typeof payload.phase === 'string') nextState.phase = payload.phase
+          if (typeof payload.label === 'string') nextState.label = payload.label
+          if ('detail' in payload) {
+            nextState.detail =
+              typeof payload.detail === 'string' && payload.detail.trim() ? payload.detail : null
+          }
+          if (typeof payload.message === 'string') {
+            nextState.message = payload.message
+          } else if (typeof payload.label === 'string') {
+            nextState.message = [payload.label, payload.detail].filter(Boolean).join(': ')
+          }
+          if (typeof payload.completed === 'number') nextState.completed = payload.completed
+          if (typeof payload.total === 'number') nextState.total = payload.total
+
+          setArcadeShellUpdateState(nextState)
+          continue
+        } catch (error) {
+          console.warn('[arcade-shell-updater] failed to parse status line', error)
+        }
+      }
+
+      setArcadeShellUpdateState({ message: line })
+      console.log(line)
+    }
+  }
+
+  child.stdout.on('data', handleOutput)
+  child.stderr.on('data', handleOutput)
+
+  child.on('error', err => {
+    arcadeShellUpdateChild = null
+    setArcadeShellUpdateState({
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      message: err.message,
+      exitCode: null,
+    })
+  })
+
+  child.on('exit', code => {
+    arcadeShellUpdateChild = null
+    setArcadeShellUpdateState({
+      status: code === 0 ? 'completed' : 'failed',
+      finishedAt: new Date().toISOString(),
+      exitCode: code,
+    })
+  })
+
+  return { started: true, status: getArcadeShellUpdateStatus() }
+}
+
 async function startVirtualDevices() {
   // Create in strict order to reduce race risk in /dev/input enumeration.
   virtualP1 = startVirtualDevice('Arcade Virtual P1')
@@ -1750,15 +1901,20 @@ function getJsIndexFromSymlink(path) {
   }
 }
 
-const casinoIndex = getJsIndexFromSymlink('/dev/input/casino')
-const p1Index = getJsIndexFromSymlink('/dev/input/player1')
-const p2Index = getJsIndexFromSymlink('/dev/input/player2')
+const INPUT_DEVICE_RETRY_MISSING_MS = 250
+const INPUT_DEVICE_RETRY_ERROR_MS = 1000
+const waitingInputDevices = new Set()
 
-console.log('[INPUT LINK]', {
-  casino: casinoIndex,
-  player1: p1Index,
-  player2: p2Index,
-})
+function logInputLinks(reason = 'snapshot') {
+  console.log('[INPUT LINK]', {
+    reason,
+    casino: getJsIndexFromSymlink('/dev/input/casino'),
+    player1: getJsIndexFromSymlink('/dev/input/player1'),
+    player2: getJsIndexFromSymlink('/dev/input/player2'),
+  })
+}
+
+logInputLinks('boot')
 
 function startEventDevice(path, label) {
   if (!IS_PI) {
@@ -1767,8 +1923,17 @@ function startEventDevice(path, label) {
   }
 
   if (!fs.existsSync(path)) {
-    console.log(`[WAIT] ${path} not present`)
-    return setTimeout(() => startEventDevice(path, label), 1000)
+    if (!waitingInputDevices.has(path)) {
+      waitingInputDevices.add(path)
+      console.log(`[WAIT] ${label} waiting for ${path}`)
+      logInputLinks(`${label.toLowerCase()}-waiting`)
+    }
+    return setTimeout(() => startEventDevice(path, label), INPUT_DEVICE_RETRY_MISSING_MS)
+  }
+
+  if (waitingInputDevices.delete(path)) {
+    console.log(`[READY] ${label} detected ${path}`)
+    logInputLinks(`${label.toLowerCase()}-ready`)
   }
 
   console.log(`[${label}] Opening ${path}`)
@@ -1776,7 +1941,7 @@ function startEventDevice(path, label) {
   fs.open(path, 'r', (err, fd) => {
     if (err) {
       console.error(`[${label}] open error`, err)
-      return setTimeout(() => startEventDevice(path, label), 2000)
+      return setTimeout(() => startEventDevice(path, label), INPUT_DEVICE_RETRY_ERROR_MS)
     }
 
     const buffer = Buffer.alloc(24)
@@ -1786,7 +1951,7 @@ function startEventDevice(path, label) {
         if (err || bytesRead !== 24) {
           console.error(`[${label}] read error`)
           fs.close(fd, () => {})
-          return setTimeout(() => startEventDevice(path, label), 2000)
+          return setTimeout(() => startEventDevice(path, label), INPUT_DEVICE_RETRY_ERROR_MS)
         }
 
         const type = buffer.readUInt16LE(16)
@@ -2279,6 +2444,7 @@ function clearArcadeOverlayNotice() {
     arcadeOverlayNoticeTimer = null
   }
   arcadeOverlayNotice = null
+  refreshArcadeOsdMessage()
 }
 
 function setArcadeOverlayNotice(text, ttlMs = 1600, slot = 'center') {
@@ -2295,6 +2461,7 @@ function setArcadeOverlayNotice(text, ttlMs = 1600, slot = 'center') {
     text: clean,
     slot: slot === 'left' || slot === 'right' || slot === 'center' ? slot : 'center',
   }
+  refreshArcadeOsdMessage()
 
   if (arcadeOverlayNoticeTimer !== null) {
     clearTimeout(arcadeOverlayNoticeTimer)
@@ -2304,9 +2471,19 @@ function setArcadeOverlayNotice(text, ttlMs = 1600, slot = 'center') {
     () => {
       arcadeOverlayNoticeTimer = null
       arcadeOverlayNotice = null
+      refreshArcadeOsdMessage()
     },
     Math.max(250, ttlMs),
   )
+}
+
+function refreshArcadeOsdMessage() {
+  if (!arcadeSession?.active) return
+  const promptMessage = buildArcadePromptMessage()
+  if (!promptMessage) return
+  showArcadeOsdMessage(promptMessage, { bypassCooldown: true })
+  lastArcadePromptLoopMessage = promptMessage
+  lastArcadePromptLoopSentAt = Date.now()
 }
 
 function maybeRestartUiAfterExit(reason) {
@@ -2865,6 +3042,9 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(getNetworkInfo()))
     return
   }
+  if (req.method === 'GET' && req.url === '/arcade-shell-update/status') {
+    return sendJson(res, 200, { success: true, ...getArcadeShellUpdateStatus() })
+  }
   if (req.method === 'GET' && req.url === '/wifi-scan') {
     if (!IS_PI) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -2909,6 +3089,87 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET') {
     const safePath = path.normalize(req.url).replace(/^(\.\.[\/\\])+/, '')
+
+    if (safePath === '/arcade-shell-build.json') {
+      const versionFilePath = path.join(ARCADE_RUNTIME_DIR, 'os', '.arcade-shell-version')
+      let version = ''
+      let createdAt = null
+
+      try {
+        if (fs.existsSync(versionFilePath)) {
+          version = String(fs.readFileSync(versionFilePath, 'utf8') || '').trim()
+          const stats = fs.statSync(versionFilePath)
+          createdAt = stats.mtime.toISOString()
+        }
+      } catch (err) {
+        console.error('Build metadata read error:', err)
+      }
+
+      if (!version) {
+        version = String(process.env.ARCADE_SHELL_VERSION || '').trim()
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+      })
+      return res.end(
+        JSON.stringify({
+          version: version || 'unknown',
+          created_at: createdAt,
+        }),
+      )
+    }
+
+    if (safePath === '/boot.png') {
+      const bootPath = path.join(ARCADE_RUNTIME_DIR, 'os', 'boot', 'boot.png')
+
+      if (!fs.existsSync(bootPath)) {
+        res.writeHead(404)
+        return res.end('Not found')
+      }
+
+      try {
+        const data = fs.readFileSync(bootPath)
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=3600',
+        })
+        return res.end(data)
+      } catch (err) {
+        console.error('Boot image read error:', err)
+        res.writeHead(500)
+        return res.end('Server error')
+      }
+    }
+
+    if (safePath.startsWith('/roms/')) {
+      const romAssetPath = safePath.replace(/^\/roms\//, '')
+      const filePath = path.join(ROMS_ROOT, romAssetPath)
+
+      if (!filePath.startsWith(ROMS_ROOT)) {
+        res.writeHead(403)
+        return res.end('Forbidden')
+      }
+
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404)
+        return res.end('Not found')
+      }
+
+      try {
+        const data = fs.readFileSync(filePath)
+        res.writeHead(200, {
+          'Content-Type': getMimeType(filePath),
+          'Cache-Control': 'public, max-age=3600',
+        })
+        return res.end(data)
+      } catch (err) {
+        console.error('ROM static read error:', err)
+        res.writeHead(500)
+        return res.end('Server error')
+      }
+    }
 
     if (safePath.startsWith('/runtime-games/')) {
       const runtimePath = safePath.replace('/runtime-games/', '')
@@ -3145,6 +3406,28 @@ const server = http.createServer((req, res) => {
       }
       sendJson(res, 200, { success: true, action: 'shutdown', scheduled: true })
       scheduleSystemPowerAction('shutdown')
+    })
+    return
+  }
+
+  if (req.method === 'POST' && req.url === '/arcade-shell-update/run') {
+    let body = ''
+    req.on('data', chunk => {
+      body += chunk
+    })
+    req.on('end', () => {
+      let reason = 'manual'
+      try {
+        const payload = body ? JSON.parse(body) : {}
+        if (typeof payload.reason === 'string' && payload.reason.trim()) {
+          reason = payload.reason.trim()
+        }
+      } catch {
+        // Ignore invalid body for this endpoint.
+      }
+
+      const result = triggerArcadeShellUpdate(reason)
+      return sendJson(res, 200, { success: true, ...result })
     })
     return
   }

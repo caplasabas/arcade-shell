@@ -4,16 +4,18 @@ declare global {
   }
 }
 
-import {StrictMode} from 'react'
-import {createRoot} from 'react-dom/client'
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
 import './styles/base.css'
+import { WS_BASE } from './lib/runtime'
+
 import App from './App'
 
 function connect() {
-  const ws = new WebSocket('ws://localhost:5175')
+  const ws = new WebSocket(WS_BASE)
 
   ws.onopen = () => {
-    console.log(`[WS_OPEN]: ${'ws://localhost:5175'}`);
+    console.log(`[WS_OPEN]: ${WS_BASE}`)
   }
 
   ws.onmessage = e => {
@@ -22,8 +24,7 @@ function connect() {
       console.log('[WS_MESSAGE]:', payload)
 
       window.__ARCADE_INPUT__?.(payload)
-    } catch {
-    }
+    } catch {}
   }
 
   ws.onclose = () => {
@@ -31,7 +32,7 @@ function connect() {
     setTimeout(connect, 1000)
   }
 
-  ws.onerror = (error) => {
+  ws.onerror = error => {
     console.log('[WS_ERROR]:', error)
 
     ws.close()
@@ -39,7 +40,6 @@ function connect() {
 }
 
 connect()
-
 
 // if (import.meta.hot) {
 //   import.meta.hot.accept()
@@ -76,6 +76,6 @@ connect()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App/>
+    <App />
   </StrictMode>,
 )

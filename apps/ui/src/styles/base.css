@@ -11,14 +11,23 @@
     line-height: 1.5;
     font-weight: 400;
 
-    color-scheme: light dark;
+    color-scheme: dark;
     color: rgba(255, 255, 255, 0.87);
-    /*background-color: #242424;*/
+    background-color: #000;
 
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+    width: 100%;
+    min-width: 100%;
+    min-height: 100%;
+    background: #000;
 }
 
 
@@ -73,7 +82,7 @@ body {
     place-items: center;
     min-width: 320px;
     min-height: 100vh;
-    /*background: #333332;*/
+    background: #000;
 }
 
 h1 {
@@ -104,22 +113,6 @@ button:focus,
 button:focus-visible {
     outline: 4px auto -webkit-focus-ring-color;
 }
-
-@media (prefers-color-scheme: light) {
-    :root {
-        color: #213547;
-        background-color: #ffffff;
-    }
-
-    a:hover {
-        color: #747bff;
-    }
-
-    button {
-        background-color: #f9f9f9;
-    }
-}
-
 
 .casino-layer {
     position: fixed;
@@ -452,6 +445,15 @@ button:focus-visible {
     font-weight: 800;
     text-shadow: 0 0 8px rgba(255, 170, 40, 0.7),
     0 0 24px rgba(255, 170, 40, 0.4);
+}
+
+.boot-subtext {
+    margin-top: 10px;
+    color: rgba(255, 228, 188, 0.94);
+    font-size: 18px;
+    letter-spacing: 1px;
+    font-weight: 700;
+    text-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
 }
 
 @keyframes boot-spin {

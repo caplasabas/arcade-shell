@@ -2,12 +2,76 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <link href="/vite.svg" rel="icon" type="image/svg+xml" />
   <meta content="width=device-width, initial-scale=1.0" name="viewport" />
-  <title>ui</title>
+  <title>Arcade Shell</title>
+  <style>
+    html, body, #root {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      background: #000;
+    }
+    #boot-splash {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483647;
+      background:
+        linear-gradient(rgba(0, 0, 0, 0.35), rgba(0, 0, 0, 0.55)),
+        url('/boot.png') center center / cover no-repeat,
+        #000;
+    }
+    #boot-splash.hidden {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease-out;
+    }
+    #boot-splash-spinner {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 72px;
+      height: 72px;
+      margin-left: -36px;
+      margin-top: -36px;
+      border-radius: 999px;
+      border: 4px solid rgba(255, 255, 255, 0.22);
+      border-top-color: #fff;
+      box-sizing: border-box;
+      filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.35));
+      animation: arcade-spin 0.8s linear infinite;
+    }
+
+    @keyframes arcade-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+  </style>
 </head>
 <body style="margin:0;background:#000;">
+<div id="boot-splash">
+  <div id="boot-splash-spinner"></div>
+</div>
 <div id="root"></div>
+<script>
+  window.__hideArcadeBootSplash = () => {
+    const splash = document.getElementById('boot-splash')
+    if (!splash || splash.classList.contains('hidden')) return
+    splash.classList.add('hidden')
+    setTimeout(() => splash.remove(), 220)
+  }
+
+  const root = document.getElementById('root')
+  const observer = new MutationObserver(() => {
+    if (root && root.childNodes.length > 0) {
+      window.__hideArcadeBootSplash()
+      observer.disconnect()
+    }
+  })
+  if (root) observer.observe(root, { childList: true })
+  window.addEventListener('load', () => {
+    setTimeout(() => window.__hideArcadeBootSplash(), 2000)
+  }, { once: true })
+</script>
 <script src="/src/main.tsx" type="module"></script>
 </body>
 </html>

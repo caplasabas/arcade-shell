@@ -16,9 +16,17 @@ export function isGameRunning() {
   return currentGame !== null
 }
 
-export function launchGame(game: GameDescriptor) {
-  if (currentGame) return
+export function launchGame(game: GameDescriptor): boolean {
+  if (currentGame) {
+    console.warn('[gameLoader] launch ignored; current game already set', {
+      currentGame,
+      requestedGame: game,
+    })
+    return false
+  }
+
   currentGame = game
+  return true
 }
 
 export function exitGame() {

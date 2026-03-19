@@ -15,7 +15,7 @@ PI_SSH_BATCH_MODE="${PI_SSH_BATCH_MODE:-0}"
 PI_SSH_KEY="${PI_SSH_KEY:-}"
 PI_SSH_OPTS="${PI_SSH_OPTS:-}"
 
-PI_REMOTE_STAGE_DIR="${PI_REMOTE_STAGE_DIR:-/home/arcade1/arcade-deploy}"
+PI_REMOTE_STAGE_DIR="${PI_REMOTE_STAGE_DIR:-/tmp/arcade-deploy}"
 PI_REMOTE_RUNTIME_DIR="${PI_REMOTE_RUNTIME_DIR:-/opt/arcade}"
 PI_REMOTE_RUNTIME_UI_DIR="${PI_REMOTE_RUNTIME_UI_DIR:-$PI_REMOTE_RUNTIME_DIR/ui}"
 PI_REMOTE_RUNTIME_SERVICE_DIR="${PI_REMOTE_RUNTIME_SERVICE_DIR:-$PI_REMOTE_RUNTIME_DIR/service}"
@@ -26,23 +26,27 @@ PI_REMOTE_RUNTIME_ROMS_DIR="${PI_REMOTE_RUNTIME_ROMS_DIR:-$PI_REMOTE_RUNTIME_DIR
 PI_BUILD_UI="${PI_BUILD_UI:-1}"
 PI_BUILD_INPUT="${PI_BUILD_INPUT:-1}"
 PI_BUILD_UINPUT_HELPER="${PI_BUILD_UINPUT_HELPER:-1}"
+PI_SYNC_UPDATER="${PI_SYNC_UPDATER:-1}"
 PI_SYNC_OS="${PI_SYNC_OS:-1}"
-PI_SYNC_ROMS="${PI_SYNC_ROMS:-1}"
+PI_SYNC_ROMS="${PI_SYNC_ROMS:-0}"
 PI_SYNC_ARCADE_SERVICE_ENV="${PI_SYNC_ARCADE_SERVICE_ENV:-1}"
 PI_INSTALL_SYSTEMD_UNITS="${PI_INSTALL_SYSTEMD_UNITS:-1}"
 PI_INSTALL_ETC_FILES="${PI_INSTALL_ETC_FILES:-1}"
 PI_DAEMON_RELOAD="${PI_DAEMON_RELOAD:-1}"
+PI_RESET_FAILED_SERVICES="${PI_RESET_FAILED_SERVICES:-1}"
 PI_RESTART_INPUT="${PI_RESTART_INPUT:-1}"
 PI_RESTART_KIOSK="${PI_RESTART_KIOSK:-1}"
+PI_REMOTE_CLEANUP_STAGE="${PI_REMOTE_CLEANUP_STAGE:-1}"
 PI_INPUT_SERVICE="${PI_INPUT_SERVICE:-arcade-input.service}"
 PI_KIOSK_SERVICE="${PI_KIOSK_SERVICE:-arcade-ui.service}"
 
 LOCAL_BUILD_DIR="${PI_LOCAL_BUILD_DIR:-$ROOT_DIR/.pi-sync-build}"
 LOCAL_UI_DIST_DIR="$ROOT_DIR/apps/ui/dist"
 LOCAL_INPUT_ENTRY="$ROOT_DIR/apps/service/input.js"
-LOCAL_INPUT_BUNDLE="$LOCAL_BUILD_DIR/input.bundle.js"
+LOCAL_INPUT_BUNDLE="$LOCAL_BUILD_DIR/input.bundle.cjs"
 LOCAL_UINPUT_HELPER_SOURCE="$ROOT_DIR/apps/service/uinput-helper.c"
 LOCAL_UINPUT_HELPER_STAGE_SOURCE="$LOCAL_BUILD_DIR/uinput-helper.c"
+LOCAL_UPDATER_SOURCE="$ROOT_DIR/scripts/arcade-shell-updater.mjs"
 LOCAL_OS_DIR="$ROOT_DIR/os"
 LOCAL_ROMS_DIR="$ROOT_DIR/roms"
 LOCAL_ARCADE_SERVICE_ENV_FILE="${PI_LOCAL_ARCADE_SERVICE_ENV_FILE:-$ROOT_DIR/.env.arcade-service}"
@@ -96,7 +100,7 @@ restart_needed_message() {
   echo "[pi-sync] Note: installed systemd units must point to runtime paths under $PI_REMOTE_RUNTIME_DIR."
   echo "[pi-sync] Example targets:"
   echo "[pi-sync]   UI assets:    $PI_REMOTE_RUNTIME_UI_DIR/dist"
-  echo "[pi-sync]   Input bundle: $PI_REMOTE_RUNTIME_SERVICE_DIR/input.bundle.js"
+  echo "[pi-sync]   Input bundle: $PI_REMOTE_RUNTIME_SERVICE_DIR/input.bundle.cjs"
   echo "[pi-sync]   Input helper: $PI_REMOTE_RUNTIME_BIN_DIR/uinput-helper"
   echo "[pi-sync]   Service env:  $PI_REMOTE_RUNTIME_OS_DIR/.env.arcade-service"
   echo "[pi-sync]   ROMs:         $PI_REMOTE_RUNTIME_ROMS_DIR"
@@ -147,7 +151,7 @@ if [[ "$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
 fi
 
 echo "[pi-sync] Preparing remote staging directory"
-"${ssh_cmd[@]}" "$PI_REMOTE_HOST" "mkdir -p '$PI_REMOTE_STAGE_DIR/ui-dist' '$PI_REMOTE_STAGE_DIR/service' '$PI_REMOTE_STAGE_DIR/bin' '$PI_REMOTE_STAGE_DIR/os' '$PI_REMOTE_STAGE_DIR/roms'"
+"${ssh_cmd[@]}" "$PI_REMOTE_HOST" "mkdir -p '$PI_REMOTE_STAGE_DIR/ui-dist' '$PI_REMOTE_STAGE_DIR/service' '$PI_REMOTE_STAGE_DIR/bin' '$PI_REMOTE_STAGE_DIR/scripts' '$PI_REMOTE_STAGE_DIR/os' '$PI_REMOTE_STAGE_DIR/roms'"
 
 RSYNC_ARGS=(
   -az
@@ -166,7 +170,7 @@ if [[ "$PI_BUILD_INPUT" == "1" ]]; then
   echo "[pi-sync] Uploading bundled input service"
   rsync "${RSYNC_ARGS[@]}" -e "${ssh_cmd[*]}" \
     "$LOCAL_INPUT_BUNDLE" \
-    "$PI_REMOTE_HOST:$PI_REMOTE_STAGE_DIR/service/input.bundle.js"
+    "$PI_REMOTE_HOST:$PI_REMOTE_STAGE_DIR/service/input.bundle.cjs"
 fi
 
 if [[ "$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
@@ -174,6 +178,18 @@ if [[ "$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
   rsync "${RSYNC_ARGS[@]}" -e "${ssh_cmd[*]}" \
     "$LOCAL_UINPUT_HELPER_STAGE_SOURCE" \
     "$PI_REMOTE_HOST:$PI_REMOTE_STAGE_DIR/bin/uinput-helper.c"
+fi
+
+if [[ "$PI_SYNC_UPDATER" == "1" ]]; then
+  if [[ ! -f "$LOCAL_UPDATER_SOURCE" ]]; then
+    echo "[pi-sync] Missing updater script: $LOCAL_UPDATER_SOURCE"
+    exit 1
+  fi
+
+  echo "[pi-sync] Uploading updater script"
+  rsync "${RSYNC_ARGS[@]}" -e "${ssh_cmd[*]}" \
+    "$LOCAL_UPDATER_SOURCE" \
+    "$PI_REMOTE_HOST:$PI_REMOTE_STAGE_DIR/scripts/arcade-shell-updater.mjs"
 fi
 
 if [[ "$PI_SYNC_OS" == "1" ]]; then
@@ -225,14 +241,17 @@ PI_REMOTE_RUNTIME_ROMS_DIR="$PI_REMOTE_RUNTIME_ROMS_DIR"
 PI_BUILD_UI="$PI_BUILD_UI"
 PI_BUILD_INPUT="$PI_BUILD_INPUT"
 PI_BUILD_UINPUT_HELPER="$PI_BUILD_UINPUT_HELPER"
+PI_SYNC_UPDATER="$PI_SYNC_UPDATER"
 PI_SYNC_OS="$PI_SYNC_OS"
 PI_SYNC_ROMS="$PI_SYNC_ROMS"
 PI_SYNC_ARCADE_SERVICE_ENV="$PI_SYNC_ARCADE_SERVICE_ENV"
 PI_INSTALL_SYSTEMD_UNITS="$PI_INSTALL_SYSTEMD_UNITS"
 PI_INSTALL_ETC_FILES="$PI_INSTALL_ETC_FILES"
 PI_DAEMON_RELOAD="$PI_DAEMON_RELOAD"
+PI_RESET_FAILED_SERVICES="$PI_RESET_FAILED_SERVICES"
 PI_RESTART_INPUT="$PI_RESTART_INPUT"
 PI_RESTART_KIOSK="$PI_RESTART_KIOSK"
+PI_REMOTE_CLEANUP_STAGE="$PI_REMOTE_CLEANUP_STAGE"
 PI_INPUT_SERVICE="$PI_INPUT_SERVICE"
 PI_KIOSK_SERVICE="$PI_KIOSK_SERVICE"
 
@@ -263,6 +282,11 @@ restart_service() {
   sudo_cmd systemctl restart "\$svc"
 }
 
+reset_failed_service() {
+  local svc="\$1"
+  sudo_cmd systemctl reset-failed "\$svc" || true
+}
+
 if [[ "\$PI_BUILD_UI" == "1" ]]; then
   echo "[pi-sync:remote] Installing built UI -> \$PI_REMOTE_RUNTIME_UI_DIR/dist"
   sudo_cmd mkdir -p "\$PI_REMOTE_RUNTIME_UI_DIR/dist"
@@ -270,9 +294,9 @@ if [[ "\$PI_BUILD_UI" == "1" ]]; then
 fi
 
 if [[ "\$PI_BUILD_INPUT" == "1" ]]; then
-  echo "[pi-sync:remote] Installing input bundle -> \$PI_REMOTE_RUNTIME_SERVICE_DIR/input.bundle.js"
+  echo "[pi-sync:remote] Installing input bundle -> \$PI_REMOTE_RUNTIME_SERVICE_DIR/input.bundle.cjs"
   sudo_cmd mkdir -p "\$PI_REMOTE_RUNTIME_SERVICE_DIR"
-  sudo_cmd install -D -m 0755 "\$PI_REMOTE_STAGE_DIR/service/input.bundle.js" "\$PI_REMOTE_RUNTIME_SERVICE_DIR/input.bundle.js"
+  sudo_cmd install -D -m 0755 "\$PI_REMOTE_STAGE_DIR/service/input.bundle.cjs" "\$PI_REMOTE_RUNTIME_SERVICE_DIR/input.bundle.cjs"
 fi
 
 if [[ "\$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
@@ -295,10 +319,15 @@ if [[ "\$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
   sudo_cmd install -D -m 0755 "\$build_tmp" "\$PI_REMOTE_RUNTIME_BIN_DIR/uinput-helper"
 fi
 
+if [[ "\$PI_SYNC_UPDATER" == "1" && -f "\$PI_REMOTE_STAGE_DIR/scripts/arcade-shell-updater.mjs" ]]; then
+  echo "[pi-sync:remote] Installing updater script -> /usr/local/bin/arcade-shell-updater.mjs"
+  sudo_cmd install -D -m 0755 "\$PI_REMOTE_STAGE_DIR/scripts/arcade-shell-updater.mjs" "/usr/local/bin/arcade-shell-updater.mjs"
+fi
+
 if [[ "\$PI_SYNC_OS" == "1" ]]; then
   echo "[pi-sync:remote] Installing os payload -> \$PI_REMOTE_RUNTIME_OS_DIR"
   sudo_cmd mkdir -p "\$PI_REMOTE_RUNTIME_OS_DIR"
-  sudo_cmd rsync -a --delete "\$PI_REMOTE_STAGE_DIR/os/" "\$PI_REMOTE_RUNTIME_OS_DIR/"
+  sudo_cmd rsync -a --delete --exclude '.env.arcade-service' "\$PI_REMOTE_STAGE_DIR/os/" "\$PI_REMOTE_RUNTIME_OS_DIR/"
 fi
 
 if [[ "\$PI_SYNC_ARCADE_SERVICE_ENV" == "1" && -f "\$PI_REMOTE_STAGE_DIR/os/.env.arcade-service" ]]; then
@@ -342,6 +371,18 @@ if [[ "\$PI_DAEMON_RELOAD" == "1" ]]; then
   sudo_cmd systemctl daemon-reload
 fi
 
+if [[ "\$PI_RESET_FAILED_SERVICES" == "1" ]]; then
+  if [[ "\$PI_RESTART_INPUT" == "1" ]]; then
+    echo "[pi-sync:remote] Resetting failed state for \$PI_INPUT_SERVICE"
+    reset_failed_service "\$PI_INPUT_SERVICE"
+  fi
+
+  if [[ "\$PI_RESTART_KIOSK" == "1" ]]; then
+    echo "[pi-sync:remote] Resetting failed state for \$PI_KIOSK_SERVICE"
+    reset_failed_service "\$PI_KIOSK_SERVICE"
+  fi
+fi
+
 if [[ "\$PI_RESTART_INPUT" == "1" ]]; then
   echo "[pi-sync:remote] Restarting \$PI_INPUT_SERVICE"
   restart_service "\$PI_INPUT_SERVICE"
@@ -350,6 +391,11 @@ fi
 if [[ "\$PI_RESTART_KIOSK" == "1" ]]; then
   echo "[pi-sync:remote] Restarting \$PI_KIOSK_SERVICE"
   restart_service "\$PI_KIOSK_SERVICE"
+fi
+
+if [[ "\$PI_REMOTE_CLEANUP_STAGE" == "1" ]]; then
+  echo "[pi-sync:remote] Cleaning remote staging directory"
+  rm -rf "\$PI_REMOTE_STAGE_DIR"
 fi
 
 echo "[pi-sync:remote] Done"

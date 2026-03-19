@@ -8,7 +8,7 @@
 #dtparam=spi=on
 hdmi_force_hotplug=1
 hdmi_group=2
-hdmi_mode=47
+hdmi_mode=51
 
 # Enable audio (loads snd_bcm2835)
 #dtparam=audio=on
@@ -28,10 +28,6 @@ auto_initramfs=1
 # Enable DRM VC4 V3D driver
 dtoverlay=vc4-kms-v3d,noaudio
 max_framebuffers=2
-
-# Don't have the firmware create an initial video= setting in cmdline.txt.
-# Use the kernel's default instead.
-disable_fw_kms_setup=1
 
 # Run in 64-bit mode
 arm_64bit=1
@@ -56,5 +52,4 @@ otg_mode=1
 dtoverlay=dwc2,dr_mode=host
 dtoverlay=disable-bt
 [all]
-disable_splash=1
 initramfs initramfs_2712 followkernel

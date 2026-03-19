@@ -14,6 +14,8 @@ import { type ExitConfirmContext, ExitConfirmModal } from './components/ExitConf
 
 import { ensureDeviceRegistered } from './lib/device'
 import { flushMetricEvents, queueMetricEvent } from './lib/metrics'
+import { API_BASE } from './lib/runtime'
+
 import { supabase } from './lib/supabase'
 
 import { formatPeso } from './utils'
@@ -34,13 +36,23 @@ export type Game = {
   version?: number
 }
 
-const PAGE_SIZE = 12
+const GRID_ROWS = 3
+const GRID_VISIBLE_COLS = 4
 const EXIT_CONFIRM_WINDOW_MS = 2800
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
 const ARCADE_SHELL_VERSION =
   String(import.meta.env.VITE_ARCADE_SHELL_VERSION || '').trim() || '0.6.0'
+
+type ShellUpdateStatus = {
+  status?: string
+  running?: boolean
+  phase?: string | null
+  label?: string
+  detail?: string | null
+  message?: string
+}
 
 type DeviceAdminCommandType = 'restart' | 'shutdown'
 
@@ -85,7 +97,6 @@ function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
 }
 
 export default function App() {
-  const [page, setPage] = useState(0)
   const [focus, setFocus] = useState(0)
   const [runningCasino, setRunningCasino] = useState(false)
   const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
@@ -116,10 +127,7 @@ export default function App() {
 
   const [games, setGames] = useState<Game[]>([])
 
-  const pageCount = Math.ceil(games.length / PAGE_SIZE)
-  const pageGames = games.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
-
-  const selectedGame = pageGames[focus]
+  const selectedGame = games[focus] ?? null
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -140,7 +148,7 @@ export default function App() {
 
     const fetchNetworkInfo = async () => {
       try {
-        const res = await fetch('http://localhost:5174/network-info')
+        const res = await fetch(`${API_BASE}/network-info`)
         if (!res.ok) return
         const data = (await res.json()) as { ethernet?: string | null; wifi?: string | null }
         if (stopped) return
@@ -172,6 +180,14 @@ export default function App() {
   }, [networkStage])
 
   const [loading, setLoading] = useState(false)
+  const [bootFlowComplete, setBootFlowComplete] = useState(false)
+  const [shellUpdateOverlayVisible, setShellUpdateOverlayVisible] = useState(false)
+  const [shellUpdateOverlayStatus, setShellUpdateOverlayStatus] = useState<ShellUpdateStatus>({
+    label: 'Checking for updates',
+    detail: null,
+  })
+  const shellUpdateRequestedRef = useRef(false)
+  const shellUpdateStableTimerRef = useRef<number | null>(null)
 
   const [runningGame, setRunningGame] = useState<{
     id: string
@@ -260,7 +276,7 @@ export default function App() {
 
   const executeLocalPowerCommand = useCallback(async (command: DeviceAdminCommandType) => {
     const endpoint = command === 'restart' ? '/system/restart' : '/system/shutdown'
-    const response = await fetch(`http://localhost:5174${endpoint}`, {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -391,6 +407,74 @@ export default function App() {
       if (unsubscribe) unsubscribe()
     }
   }, [networkStage])
+
+  useEffect(() => {
+    if (networkStage !== 'ok' || !initialized) {
+      if (shellUpdateStableTimerRef.current !== null) {
+        window.clearTimeout(shellUpdateStableTimerRef.current)
+        shellUpdateStableTimerRef.current = null
+      }
+      return
+    }
+
+    if (bootFlowComplete || shellUpdateRequestedRef.current) return
+
+    shellUpdateStableTimerRef.current = window.setTimeout(async () => {
+      shellUpdateStableTimerRef.current = null
+
+      if (shellUpdateRequestedRef.current) return
+      shellUpdateRequestedRef.current = true
+      setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
+      setShellUpdateOverlayVisible(true)
+
+      try {
+        const runResponse = await fetch(`${API_BASE}/arcade-shell-update/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'ui-stable-online' }),
+        })
+
+        if (!runResponse.ok) return
+
+        const runPayload = (await runResponse.json().catch(() => null)) as {
+          status?: ShellUpdateStatus
+        } | null
+        if (runPayload?.status) {
+          setShellUpdateOverlayStatus(runPayload.status)
+        }
+
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await new Promise(resolve => window.setTimeout(resolve, 500))
+
+          const statusResponse = await fetch(`${API_BASE}/arcade-shell-update/status`, {
+            cache: 'no-store',
+          }).catch(() => null)
+
+          if (!statusResponse?.ok) continue
+
+          const status = (await statusResponse.json()) as ShellUpdateStatus
+          setShellUpdateOverlayStatus(status)
+
+          if (!status.running && status.status && status.status !== 'running') {
+            break
+          }
+        }
+      } catch (error) {
+        console.error('[UPDATER] failed to trigger', error)
+      } finally {
+        setShellUpdateOverlayVisible(false)
+        setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
+        setBootFlowComplete(true)
+      }
+    }, 2500)
+
+    return () => {
+      if (shellUpdateStableTimerRef.current !== null) {
+        window.clearTimeout(shellUpdateStableTimerRef.current)
+        shellUpdateStableTimerRef.current = null
+      }
+    }
+  }, [bootFlowComplete, initialized, networkStage])
 
   useEffect(() => {
     if (!deviceId) return
@@ -620,7 +704,7 @@ export default function App() {
     const timer = window.setTimeout(() => {
       console.log('[UI BALANCE PUSH]', balance)
 
-      fetch('http://127.0.0.1:5174/arcade-life/balance', {
+      fetch(`${API_BASE}/arcade-life/balance`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ balance }),
@@ -819,7 +903,6 @@ export default function App() {
   })
 
   const focusRef = useRef(focus)
-  const pageRef = useRef(page)
 
   const gamesRef = useRef(games)
 
@@ -830,10 +913,6 @@ export default function App() {
   useEffect(() => {
     focusRef.current = focus
   }, [focus])
-
-  useEffect(() => {
-    pageRef.current = page
-  }, [page])
 
   useEffect(() => {
     gamesRef.current = games
@@ -1078,7 +1157,7 @@ export default function App() {
               if (getMaxSelectable(s.balance) < MIN) break
               setShowWithdrawModalRef.current(true)
             } else if (!s.isWithdrawing && isValidWithdrawAmount(s.withdrawAmount, s.balance)) {
-              fetch('http://localhost:5174', {
+              fetch(API_BASE, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1115,23 +1194,30 @@ export default function App() {
   function handleMenuInput(button: any) {
     switch (button) {
       case 'UP':
-        moveFocus(-COLS)
-        break
-      case 'DOWN':
-        moveFocus(COLS)
-        break
-      case 'LEFT':
         moveFocus(-1)
         break
-      case 'RIGHT':
+      case 'DOWN':
         moveFocus(1)
+        break
+      case 'LEFT':
+        moveFocus(-GRID_ROWS)
+        break
+      case 'RIGHT':
+        moveFocus(GRID_ROWS)
         break
       case 6:
         requestExitConfirm('menu')
         break
-      case 7: // A button still numeric
-        if (selectedGameRef.current) launch(selectedGameRef.current)
+      case 7: {
+        console.log('[UI] start/confirm pressed', {
+          selectedGame: selectedGameRef.current,
+          focus: focusRef.current,
+        })
+        if (selectedGameRef.current) {
+          void launch(selectedGameRef.current)
+        }
         break
+      }
     }
   }
 
@@ -1151,31 +1237,26 @@ export default function App() {
     exitGame()
   }
 
-  const COLS = 4
-
-  const bgOffset = (focus % COLS) * 6
+  const bgOffset = (Math.floor(focus / GRID_ROWS) % GRID_VISIBLE_COLS) * 6
 
   function moveFocus(delta: number) {
     setFocus(prev => {
-      const currentPage = pageRef.current
       const currentGames = gamesRef.current
+      const nextIndex = prev + delta
 
-      const absoluteIndex = currentPage * PAGE_SIZE + prev
-      const nextAbsolute = absoluteIndex + delta
+      if (nextIndex < 0) return prev
+      if (nextIndex >= currentGames.length) return prev
 
-      if (nextAbsolute < 0) return prev
-      if (nextAbsolute >= currentGames.length) return prev
-
-      const newPage = Math.floor(nextAbsolute / PAGE_SIZE)
-      const newFocus = nextAbsolute % PAGE_SIZE
-
-      if (newPage !== currentPage) {
-        setPage(newPage)
-      }
-
-      return newFocus
+      return nextIndex
     })
   }
+
+  useEffect(() => {
+    setFocus(prev => {
+      if (games.length === 0) return 0
+      return Math.min(prev, games.length - 1)
+    })
+  }, [games.length])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -1189,19 +1270,19 @@ export default function App() {
 
       switch (e.key) {
         case 'ArrowRight':
-          moveFocus(1)
+          moveFocus(GRID_ROWS)
           break
 
         case 'ArrowLeft':
-          moveFocus(-1)
+          moveFocus(-GRID_ROWS)
           break
 
         case 'ArrowDown':
-          moveFocus(COLS)
+          moveFocus(1)
           break
 
         case 'ArrowUp':
-          moveFocus(-COLS)
+          moveFocus(-1)
           break
 
         case 'Enter':
@@ -1213,11 +1294,44 @@ export default function App() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [focus, page, requestExitConfirm, runningCasino, selectedGame])
+  }, [focus, requestExitConfirm, runningCasino, selectedGame])
 
   async function launch(game: Game) {
-    if (!game || isGameRunning()) return
-    if (networkStageRef.current !== 'ok') return
+    const frontendGameRunning = Boolean(runningGameRef.current) || runningCasino
+    const engineGameRunning = isGameRunning()
+
+    console.log('[LAUNCH] requested', {
+      game,
+      networkStage: networkStageRef.current,
+      frontendGameRunning,
+      engineGameRunning,
+      runningGame: runningGameRef.current,
+      runningCasino,
+    })
+
+    if (!game) {
+      console.warn('[LAUNCH] aborted: missing game')
+      return
+    }
+
+    if (networkStageRef.current !== 'ok') {
+      console.warn('[LAUNCH] aborted: network stage is not ok', {
+        networkStage: networkStageRef.current,
+      })
+      return
+    }
+
+    if (frontendGameRunning) {
+      console.warn('[LAUNCH] aborted: frontend already has running game state', {
+        runningGame: runningGameRef.current,
+        runningCasino,
+      })
+      return
+    }
+
+    if (engineGameRunning) {
+      console.warn('[LAUNCH] continuing despite stale gameLoader running flag')
+    }
 
     if (game.type === 'casino') {
       if (!game.package_url) {
@@ -1231,7 +1345,7 @@ export default function App() {
 
       setCasinoPreparing(true)
       try {
-        const prepareRes = await fetch('http://localhost:5174/game-package/prepare', {
+        const prepareRes = await fetch(`${API_BASE}/game-package/prepare`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1259,7 +1373,7 @@ export default function App() {
 
         // Clean up old version in /dev/shm to avoid stale buildup.
         if (Number.isFinite(prevVersion) && prevVersion !== requestedVersion) {
-          void fetch('http://localhost:5174/game-package/remove', {
+          void fetch(`${API_BASE}/game-package/remove`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1300,7 +1414,15 @@ export default function App() {
         return
       }
 
-      const response = await fetch('http://localhost:5174', {
+      console.log('[LAUNCH] arcade request payload', {
+        id: game.id,
+        name: game.name,
+        core: game.emulator_core,
+        rom: game.rom_path,
+        balance: balanceRef.current,
+      })
+
+      const response = await fetch(API_BASE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1324,14 +1446,20 @@ export default function App() {
         return
       }
 
+      console.log('[LAUNCH] arcade backend accepted launch', {
+        id: game.id,
+        core: game.emulator_core,
+        rom: game.rom_path,
+      })
+
+      setRunningGame({ id: game.id, type: 'arcade', core: game.emulator_core, rom: game.rom_path })
+
       launchGame({
         id: game.id,
         type: 'arcade',
         core: game.emulator_core,
         rom: game.rom_path,
       })
-
-      setRunningGame({ id: game.id, type: 'arcade', core: game.emulator_core, rom: game.rom_path })
     }
   }
 
@@ -1386,7 +1514,7 @@ export default function App() {
     )
   }
 
-  if (((!initialized || loading) && networkStage === 'ok') || networkStage === 'boot') {
+  if (networkStage === 'boot' || (networkStage === 'ok' && !bootFlowComplete)) {
     return (
       <div className="boot-loading">
         <img
@@ -1417,7 +1545,17 @@ export default function App() {
           }}
         >
           <div className="boot-spinner" />
-          <div className="boot-text">Initializing...</div>
+          {shellUpdateOverlayVisible &&
+          (shellUpdateOverlayStatus.label?.trim() || shellUpdateOverlayStatus.detail?.trim()) ? (
+            <>
+              {shellUpdateOverlayStatus.label?.trim() ? (
+                <div className="boot-text">{shellUpdateOverlayStatus.label.trim()}</div>
+              ) : null}
+              {shellUpdateOverlayStatus.detail?.trim() ? (
+                <div className="boot-subtext">{shellUpdateOverlayStatus.detail.trim()}</div>
+              ) : null}
+            </>
+          ) : null}
         </div>
       </div>
     )
@@ -1510,7 +1648,7 @@ export default function App() {
           onCancel={() => setShowWithdrawModal(false)}
           onConfirm={() => {
             if (!isValidWithdrawAmount(withdrawAmount, balance)) return
-            fetch('http://localhost:5174', {
+            fetch(API_BASE, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -1541,7 +1679,12 @@ export default function App() {
         </div>
       )}
 
-      <GameGrid balance={balance} games={pageGames} focusedIndex={focus} page={page} />
+      <GameGrid
+        balance={balance}
+        games={games}
+        focusedIndex={focus}
+        hasOverflow={games.length > GRID_ROWS * GRID_VISIBLE_COLS}
+      />
       {/*{!runningCasino && runningGame?.type === 'arcade' && arcadeLifeOverlay.active && (*/}
       {/*  <div className="arcade-life-overlay">*/}
       {/*    <div className="arcade-life-title">{arcadeLifeOverlay.gameName ?? 'Arcade'}</div>*/}
@@ -1566,19 +1709,7 @@ export default function App() {
             <div className="balance-display">
               Balance <span className="balance-amount">{formatPeso(balance ?? 0)}</span>
             </div>
-
-            <div className="device-info">
-              <label className="device-label">
-                Device ID#:<span>{deviceId}</span>{' '}
-              </label>
-              <label className="device-label">
-                IP:<span>{ethernetIp ? `eth0 ${ethernetIp}` : ''}</span>
-                <span>{ethernetIp && wifiIp ? '|' : ''}</span>
-                <span>{wifiIp ? `wlan0 ${wifiIp}` : ''}</span>
-                <span>{!ethernetIp && !wifiIp ? 'N/A' : ''}</span>
-              </label>
-            </div>
-            <ArcadeShellVersionBadge />
+            <ArcadeShellVersionBadge deviceId={deviceId} ethernetIp={ethernetIp} wifiIp={wifiIp} />
           </div>
         </>
       )}

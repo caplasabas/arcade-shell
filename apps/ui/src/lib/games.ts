@@ -1,5 +1,21 @@
 import { supabase } from './supabase'
 
+function resolveGameArt(boxArtUrl: unknown) {
+  const raw = String(boxArtUrl ?? '').trim()
+  if (!raw) return raw
+
+  if (/^https?:\/\//i.test(raw) || raw.startsWith('/')) {
+    return raw
+  }
+
+  if (raw.startsWith('assets/boxart/')) {
+    const fileName = raw.slice('assets/boxart/'.length)
+    return `/roms/boxart/${fileName}`
+  }
+
+  return raw
+}
+
 export async function fetchCabinetGames(deviceId: string) {
   const { data, error } = await supabase
     .from('cabinet_games')
@@ -35,7 +51,7 @@ export async function fetchCabinetGames(deviceId: string) {
       name: g.name,
       type: g.type,
       price: g.price,
-      art: g.box_art_url,
+      art: resolveGameArt(g.box_art_url),
       emulator_core: g.emulator_core,
       rom_path: g.rom_path,
       package_url: g.package_url,
