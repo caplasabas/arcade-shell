@@ -106,6 +106,7 @@ export default function App() {
   const [focus, setFocus] = useState(0)
   const [runningCasino, setRunningCasino] = useState(false)
   const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
+  const casinoFrameRef = useRef<HTMLIFrameElement | null>(null)
   const [casinoPreparing, setCasinoPreparing] = useState(false)
   const [casinoLaunchError, setCasinoLaunchError] = useState<string | null>(null)
   const preparedCasinoVersionRef = useRef<Record<string, number>>({})
@@ -993,6 +994,18 @@ export default function App() {
   useEffect(() => {
     window.__ARCADE_INPUT__ = payload => {
       const s = shellStateRef.current
+      const casinoFrameWindow = casinoFrameRef.current?.contentWindow as
+        | (Window & { __ARCADE_INPUT__?: (payload: any) => void })
+        | null
+      const forwardToCasino = () => {
+        try {
+          casinoFrameWindow?.__ARCADE_INPUT__?.(payload)
+        } catch {}
+
+        try {
+          casinoFrameWindow?.postMessage({ type: 'ARCADE_INPUT', payload }, '*')
+        } catch {}
+      }
 
       if (payload.type === 'INTERNET_LOST') {
         if (internetLossTimerRef.current) return
@@ -1120,6 +1133,9 @@ export default function App() {
       }
 
       if (payload.type === 'HOPPER_COIN') {
+        if (s.runningCasino) {
+          forwardToCasino()
+        }
         addHopperBalance(payload.amount ?? 20)
         return
       }
@@ -1134,6 +1150,17 @@ export default function App() {
         return
       }
 
+      if (s.runningCasino) {
+        if (
+          payload.type === 'COIN' ||
+          payload.type === 'WITHDRAW_DISPENSE' ||
+          payload.type === 'WITHDRAW_COMPLETE'
+        ) {
+          forwardToCasino()
+          return
+        }
+      }
+
       // ----------------------------------
       // PLAYER INPUT
       // ----------------------------------
@@ -1141,6 +1168,7 @@ export default function App() {
         const button = payload.button
 
         if (s.runningCasino) {
+          forwardToCasino()
           return
         }
 
@@ -1234,6 +1262,7 @@ export default function App() {
           }
         }
       } else if (payload.type === 'ACTION') {
+        forwardToCasino()
         if (payload.action === 'MENU') {
           if (s.showExitConfirmModal) {
             confirmExitRef.current()
@@ -1814,6 +1843,7 @@ export default function App() {
           }}
         >
           <iframe
+            ref={casinoFrameRef}
             src={runningCasinoSrc ?? 'about:blank'}
             style={{
               width: '100%',

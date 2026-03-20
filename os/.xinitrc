@@ -31,9 +31,9 @@ exec /usr/lib/chromium/chromium \
   --disable-session-crashed-bubble \
   --disable-restore-session-state \
   --disable-features=PaintHolding \
-  --disable-gpu \
-  --disable-gpu-rasterization \
-  --disable-gpu-compositing \
+  --enable-gpu-rasterization \
+  --enable-zero-copy \
+  --ignore-gpu-blocklist \
   --ozone-platform=x11 \
   --default-background-color=000000 \
   --user-data-dir="$KIOSK_PROFILE_DIR"

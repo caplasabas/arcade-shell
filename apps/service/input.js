@@ -344,6 +344,10 @@ const ARCADE_RETRO_OSD_LABEL = String(process.env.ARCADE_RETRO_OSD_LABEL || '')
   .replace(/\s+/g, ' ')
   .trim()
 const ARCADE_RETRO_OSD_SHOW_SESSION_STATS = process.env.ARCADE_RETRO_OSD_SHOW_SESSION_STATS !== '0'
+const ARCADE_RETRO_OVERLAY_HIDE_AFTER_CREDIT_MS = parseNonNegativeMs(
+  process.env.ARCADE_RETRO_OVERLAY_HIDE_AFTER_CREDIT_MS,
+  10000,
+)
 const ARCADE_LIFE_CONTINUE_SECONDS = (() => {
   const parsed = Number(process.env.ARCADE_LIFE_CONTINUE_SECONDS || 0)
   if (!Number.isFinite(parsed)) return 0
@@ -862,7 +866,7 @@ function isArcadePlayerLocked(source) {
 }
 
 function isAllowedLockedInput(index) {
-  return isStartButton(index) || isLifePurchaseButton(index)
+  return isStartButton(index)
 }
 
 function isBlockedCasinoActionDuringRetroarch(action) {
@@ -940,13 +944,30 @@ function getArcadeRetroFooterState(balanceOverride = null) {
   const exitConfirmArmed = Number(retroarchExitConfirmUntil || 0) > now
   const p1HasCredit = Number(arcadeSession?.playerLivesPurchased?.P1 || 0) > 0
   const p2HasCredit = Number(arcadeSession?.playerLivesPurchased?.P2 || 0) > 0
+  const latestSuccessfulChargeAt = Math.max(
+    Number(arcadeSession?.successfulChargeAt?.P1 || 0),
+    Number(arcadeSession?.successfulChargeAt?.P2 || 0),
+  )
+  const hideAfterCreditElapsed =
+    latestSuccessfulChargeAt > 0 &&
+    ARCADE_RETRO_OVERLAY_HIDE_AFTER_CREDIT_MS >= 0 &&
+    now - latestSuccessfulChargeAt >= ARCADE_RETRO_OVERLAY_HIDE_AFTER_CREDIT_MS
 
   const leftBase = p1HasCredit ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
   const centerBase = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
   const rightBase = p2HasCredit ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+  const visible = Boolean(
+    arcadeOverlayNotice ||
+      exitConfirmArmed ||
+      p1ConfirmArmed ||
+      p2ConfirmArmed ||
+      (!p1HasCredit && !p2HasCredit) ||
+      (!hideAfterCreditElapsed && (p1HasCredit || p2HasCredit)),
+  )
 
   return {
     active: Boolean(arcadeSession?.active),
+    visible,
     gameName: arcadeSession?.gameName || null,
     balanceText,
     leftText: arcadeOverlayNotice?.slot === 'left' ? arcadeOverlayNotice.text : leftBase,
@@ -1071,6 +1092,7 @@ function buildArcadePromptMessage() {
   const waitingP2 = !p2HasCredit && !arcadeContinueCountdownTimers.P2
 
   if (waitingP1 || waitingP2) {
+    if (p1HasCredit || p2HasCredit) return ''
     const priceText = getArcadeSessionPrice().toFixed(2)
     const actionLabel = getArcadeLifePromptActionLabel()
 
@@ -1096,7 +1118,7 @@ function buildArcadePromptMessage() {
     return composeArcadeOsdOverlay(`P2 LOCKED | PRESS ${actionLabel} (P${priceText})`)
   }
 
-  return composeArcadeOsdOverlay('P1 READY | P2 READY')
+  return ''
 }
 
 function scheduleArcadePromptLoop() {
@@ -1302,6 +1324,7 @@ function startArcadeLifeSession({ gameId, gameName, pricePerLife, initialBalance
     purchaseInFlight: { P1: false, P2: false },
     startConfirmUntil: { P1: 0, P2: 0 },
     lastChargeAt: { P1: 0, P2: 0 },
+    successfulChargeAt: { P1: 0, P2: 0 },
     lastKnownBalance:
       initialBalance === null || initialBalance === undefined ? null : toMoney(initialBalance, 0),
   }
@@ -1520,6 +1543,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
         clearArcadeContinueCountdown(player)
         sessionRef.startConfirmUntil[player] = 0
         sessionRef.playerLivesPurchased[player] = 1
+        sessionRef.successfulChargeAt[player] = Date.now()
         scheduleArcadeCreditExpiry(player)
 
         const priceText = getArcadeSessionPrice().toFixed(2)
@@ -2339,19 +2363,6 @@ function handleKey(source, index, value) {
           if (value === 1) handleRetroarchMenuExitIntent()
           return
         }
-
-        if (!isAllowedLockedInput(index)) {
-          if (value === 1) {
-            const priceText = getArcadeSessionPrice().toFixed(2)
-            const actionLabel = getArcadeLifePromptActionLabel()
-            showArcadeOsdMessage(
-              composeArcadeOsdOverlay(
-                `P${primaryPlayer.slice(1)} LOCKED INPUT ${actionLabel} (P${priceText})`,
-              ),
-            )
-          }
-          return
-        }
       }
     }
 
@@ -2411,30 +2422,6 @@ function routePlayerInput(source, index, value) {
     const hasStoredCredit = playerHasStoredCredit(player)
     const needsCredit = !hasStoredCredit
 
-    if (needsCredit && !isAllowedLockedInput(index)) {
-      if (value === 1) {
-        const priceText = getArcadeSessionPrice().toFixed(2)
-        const actionLabel = getArcadeLifePromptActionLabel()
-
-        showArcadeOsdMessage(
-          composeArcadeOsdOverlay(
-            `P${player.slice(1)} LOCKED INPUT ${actionLabel} (P${priceText})`,
-          ),
-        )
-
-        if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
-          startArcadeContinueCountdown(player)
-          broadcastArcadeLifeState('locked', {
-            player,
-            continueSeconds: ARCADE_LIFE_CONTINUE_SECONDS,
-          })
-        } else {
-          broadcastArcadeLifeState('locked', { player })
-        }
-      }
-      return
-    }
-
     if (arcadeSession?.active) {
       const player = normalizeArcadePlayer(source)
       if (!player) return
@@ -2443,14 +2430,17 @@ function routePlayerInput(source, index, value) {
 
       if (isLifePurchaseButton(index)) {
         if (value === 1) {
-          const hasStoredCredit = playerHasStoredCredit(player)
-
-          if (!hasStoredCredit) {
-            arcadeSession.startConfirmUntil[player] = 0
-            requestArcadeLifePurchase(player, target, BTN_START, 'buy_button')
-          } else {
+          if (hasStoredCredit) {
             showArcadeOsdMessage(
               composeArcadeOsdOverlay(`P${player.slice(1)} ALREADY HAS CREDIT`),
+              {
+                bypassCooldown: true,
+              },
+            )
+          } else {
+            const priceText = getArcadeSessionPrice().toFixed(2)
+            showArcadeOsdMessage(
+              composeArcadeOsdOverlay(`P${player.slice(1)} PRESS START (P${priceText})`),
               {
                 bypassCooldown: true,
               },

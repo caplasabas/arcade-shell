@@ -57,12 +57,13 @@ xset s noblank
 
 unclutter_pid=""
 overlay_pid=""
-overlay_launcher_pid=""
+overlay_watcher_pid=""
 retroarch_pid=""
 
 cleanup() {
-  if [[ -n "$overlay_launcher_pid" ]]; then
-    kill "$overlay_launcher_pid" >/dev/null 2>&1 || true
+  if [[ -n "$overlay_watcher_pid" ]]; then
+    kill "$overlay_watcher_pid" >/dev/null 2>&1 || true
+    wait "$overlay_watcher_pid" 2>/dev/null || true
   fi
 
   if [[ -n "$overlay_pid" ]]; then
@@ -123,6 +124,13 @@ if [[ -z "${screen_width:-}" || -z "${screen_height:-}" ]]; then
   screen_height="900"
 fi
 
+overlay_top=$((screen_height - OVERLAY_HEIGHT))
+overlay_margin=$((OVERLAY_HEIGHT * 3 / 2))
+overlay_top=$((overlay_top - overlay_margin))
+if (( overlay_top < 0 )); then
+  overlay_top=0
+fi
+
 launch_overlay() {
   if [[ "$OVERLAY_ENABLE" == "0" ]]; then
     return
@@ -133,11 +141,9 @@ launch_overlay() {
     return
   fi
 
-  local overlay_top=$((screen_height - OVERLAY_HEIGHT))
-  local overlay_margin=$((OVERLAY_HEIGHT * 3 / 2))
-  overlay_top=$((overlay_top - overlay_margin))
-  if (( overlay_top < 0 )); then
-    overlay_top=0
+  if pgrep -u "$RETRO_RUN_USER" -f "$OVERLAY_PROFILE_DIR" >/dev/null 2>&1; then
+    log "overlay already running"
+    return
   fi
 
   rm -rf "$OVERLAY_PROFILE_DIR"
@@ -164,6 +170,23 @@ launch_overlay() {
 
   overlay_pid="$!"
   log "overlay pid=$overlay_pid"
+}
+
+stop_overlay() {
+  pkill -u "$RETRO_RUN_USER" -f "$OVERLAY_PROFILE_DIR" >/dev/null 2>&1 || true
+
+  if [[ -z "$overlay_pid" ]]; then
+    log "overlay stop requested"
+    return
+  fi
+
+  if kill -0 "$overlay_pid" >/dev/null 2>&1; then
+    kill "$overlay_pid" >/dev/null 2>&1 || true
+    wait "$overlay_pid" 2>/dev/null || true
+  fi
+
+  log "overlay stopped"
+  overlay_pid=""
 }
 
 get_event_index_by_name() {
@@ -211,9 +234,8 @@ EOF
   log "runtime input config: P1 event=$p1_event index=$p1_index, P2 event=$p2_event index=$p2_index"
 }
 
-start_overlay_after_delay() {
-  local delay_seconds
-  delay_seconds="$(python3 - "$OVERLAY_DELAY_MS" <<'PY'
+get_overlay_delay_seconds() {
+  python3 - "$OVERLAY_DELAY_MS" <<'PY'
 import sys
 value = 1200
 try:
@@ -222,13 +244,27 @@ except Exception:
     value = 1200
 print(f"{value / 1000:.3f}")
 PY
-)"
+}
+
+watch_overlay_visibility() {
+  local launched="0"
+  local delay_seconds
+  delay_seconds="$(get_overlay_delay_seconds)"
 
   sleep "$delay_seconds"
 
-  if [[ -n "$retroarch_pid" ]] && kill -0 "$retroarch_pid" >/dev/null 2>&1; then
-    launch_overlay
-  fi
+  while [[ -n "$retroarch_pid" ]] && kill -0 "$retroarch_pid" >/dev/null 2>&1; do
+    if [[ "$launched" != "1" ]]; then
+      if [[ -z "$overlay_pid" ]] || ! kill -0 "$overlay_pid" >/dev/null 2>&1; then
+        launch_overlay
+        launched="1"
+      fi
+    fi
+
+    sleep 1
+  done
+
+  stop_overlay
 }
 
 retroarch_args=(--fullscreen --verbose)
@@ -253,8 +289,8 @@ retroarch_pid="$!"
 log "retroarch pid=$retroarch_pid"
 
 if [[ "$OVERLAY_ENABLE" != "0" ]]; then
-  start_overlay_after_delay &
-  overlay_launcher_pid="$!"
+  watch_overlay_visibility &
+  overlay_watcher_pid="$!"
 fi
 
 wait "$retroarch_pid"

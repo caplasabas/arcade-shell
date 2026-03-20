@@ -31,6 +31,7 @@
         display: flex;
         align-items: stretch;
         justify-content: stretch;
+        background: transparent;
       }
 
       .footer {
@@ -41,6 +42,15 @@
         gap: 8px;
         padding: 4px 12px 6px;
         background: transparent;
+        opacity: 1;
+        visibility: visible;
+        transition: opacity 120ms linear;
+      }
+
+      .footer.hidden {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
       }
 
       .zone {
@@ -108,6 +118,10 @@
           const serialized = JSON.stringify(footer)
           if (serialized === lastSerialized) return
           lastSerialized = serialized
+
+          const footerEl = document.querySelector('.footer')
+          const hidden = footer.visible === false
+          footerEl?.classList.toggle('hidden', hidden)
 
           setZone(leftEl, footer.leftText)
           setZone(centerEl, footer.centerText, { center: true })
