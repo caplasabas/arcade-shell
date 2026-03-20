@@ -13,7 +13,6 @@ Type=simple
 User=root
 Environment=SPLASH_IMAGE_PRIMARY=/opt/arcade/os/boot/boot.png
 Environment=SPLASH_IMAGE_FALLBACK=/boot/firmware/splash.png
-ExecStartPre=/usr/bin/chvt 3
 ExecStartPre=/bin/sh -lc 'for i in $(seq 1 50); do [ -e /dev/fb0 ] && exit 0; sleep 0.1; done; exit 1'
 ExecStart=/bin/sh -lc 'IMG="$SPLASH_IMAGE_PRIMARY"; if [ ! -f "$IMG" ]; then IMG="$SPLASH_IMAGE_FALLBACK"; fi; exec /usr/bin/fbi -T 3 -d /dev/fb0 -noverbose -a "$IMG" </dev/tty3 >/dev/tty3 2>/dev/tty3'
 ExecStop=/usr/bin/killall fbi

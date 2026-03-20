@@ -39,6 +39,7 @@ export type Game = {
 const GRID_ROWS = 3
 const GRID_VISIBLE_COLS = 4
 const EXIT_CONFIRM_WINDOW_MS = 2800
+const BOOT_UPDATER_NETWORK_GRACE_MS = 4500
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
@@ -72,6 +73,11 @@ type ArcadeLifeOverlayState = {
   p1Unlocked: boolean
   p2Unlocked: boolean
   balance: number | null
+}
+
+type TransitionOverlayState = {
+  visible: boolean
+  label: string
 }
 
 function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
@@ -180,6 +186,10 @@ export default function App() {
   }, [networkStage])
 
   const [loading, setLoading] = useState(false)
+  const [transitionOverlay, setTransitionOverlay] = useState<TransitionOverlayState>({
+    visible: false,
+    label: 'Loading Game...',
+  })
   const [bootFlowComplete, setBootFlowComplete] = useState(false)
   const [shellUpdateOverlayVisible, setShellUpdateOverlayVisible] = useState(false)
   const [shellUpdateOverlayStatus, setShellUpdateOverlayStatus] = useState<ShellUpdateStatus>({
@@ -187,7 +197,14 @@ export default function App() {
     detail: null,
   })
   const shellUpdateRequestedRef = useRef(false)
+  const shellUpdateSkippedThisBootRef = useRef(false)
   const shellUpdateStableTimerRef = useRef<number | null>(null)
+  const bootOverlayLabel = (
+    shellUpdateOverlayStatus.label?.trim() ||
+    shellUpdateOverlayStatus.message?.trim() ||
+    'Preparing system'
+  ).trim()
+  const bootOverlayDetail = shellUpdateOverlayStatus.detail?.trim() || null
 
   const [runningGame, setRunningGame] = useState<{
     id: string
@@ -417,7 +434,8 @@ export default function App() {
       return
     }
 
-    if (bootFlowComplete || shellUpdateRequestedRef.current) return
+    if (bootFlowComplete || shellUpdateRequestedRef.current || shellUpdateSkippedThisBootRef.current)
+      return
 
     shellUpdateStableTimerRef.current = window.setTimeout(async () => {
       shellUpdateStableTimerRef.current = null
@@ -475,6 +493,28 @@ export default function App() {
       }
     }
   }, [bootFlowComplete, initialized, networkStage])
+
+  useEffect(() => {
+    if (bootFlowComplete) return
+
+    const timer = window.setTimeout(() => {
+      if (shellUpdateRequestedRef.current || shellUpdateSkippedThisBootRef.current) return
+      if (networkStageRef.current === 'ok') return
+
+      shellUpdateSkippedThisBootRef.current = true
+      setShellUpdateOverlayVisible(false)
+      setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
+      setBootFlowComplete(true)
+
+      if (networkStageRef.current === 'boot') {
+        setNetworkStage('no-internet')
+      }
+    }, BOOT_UPDATER_NETWORK_GRACE_MS)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [bootFlowComplete])
 
   useEffect(() => {
     if (!deviceId) return
@@ -1024,6 +1064,22 @@ export default function App() {
         return
       }
 
+      if (payload.type === 'GAME_LAUNCHING') {
+        setTransitionOverlay({
+          visible: true,
+          label: 'Loading Game...',
+        })
+        return
+      }
+
+      if (payload.type === 'GAME_EXITING') {
+        setTransitionOverlay({
+          visible: true,
+          label: 'Returning to Menu...',
+        })
+        return
+      }
+
       if (payload.type === 'ARCADE_LIFE_SESSION_ENDED') {
         setArcadeLifeOverlay(prev => ({
           ...prev,
@@ -1044,6 +1100,12 @@ export default function App() {
           p2Unlocked: false,
         }))
         handleExitGame()
+        window.setTimeout(() => {
+          setTransitionOverlay({
+            visible: false,
+            label: 'Loading Game...',
+          })
+        }, 220)
 
         if (deviceIdRef.current) {
           fetchDeviceBalance(deviceIdRef.current)
@@ -1545,15 +1607,10 @@ export default function App() {
           }}
         >
           <div className="boot-spinner" />
-          {shellUpdateOverlayVisible &&
-          (shellUpdateOverlayStatus.label?.trim() || shellUpdateOverlayStatus.detail?.trim()) ? (
+          {shellUpdateOverlayVisible ? (
             <>
-              {shellUpdateOverlayStatus.label?.trim() ? (
-                <div className="boot-text">{shellUpdateOverlayStatus.label.trim()}</div>
-              ) : null}
-              {shellUpdateOverlayStatus.detail?.trim() ? (
-                <div className="boot-subtext">{shellUpdateOverlayStatus.detail.trim()}</div>
-              ) : null}
+              <div className="boot-text">{bootOverlayLabel}</div>
+              {bootOverlayDetail ? <div className="boot-subtext">{bootOverlayDetail}</div> : null}
             </>
           ) : null}
         </div>
@@ -1585,6 +1642,40 @@ export default function App() {
 
   return (
     <div>
+      {transitionOverlay.visible && (
+        <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99999 }}>
+          <img
+            src={bootImage}
+            alt="Transition"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              pointerEvents: 'none',
+              userSelect: 'none',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'rgba(0, 0, 0, 0.55)',
+            }}
+          />
+          <div
+            className="boot-loading-content"
+            style={{
+              position: 'relative',
+              zIndex: 1,
+            }}
+          >
+            <div className="boot-spinner" />
+            <div className="boot-text">{transitionOverlay.label}</div>
+          </div>
+        </div>
+      )}
       {casinoPreparing && (
         <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99998 }}>
           <img

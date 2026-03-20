@@ -7,35 +7,25 @@ declare global {
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles/base.css'
-import { WS_BASE } from './lib/runtime'
+import { API_BASE } from './lib/runtime'
 
 import App from './App'
 
 function connect() {
-  const ws = new WebSocket(WS_BASE)
+  const events = new EventSource(`${API_BASE}/events`)
 
-  ws.onopen = () => {
-    console.log(`[WS_OPEN]: ${WS_BASE}`)
-  }
+  events.onopen = () => {}
 
-  ws.onmessage = e => {
+  events.onmessage = e => {
     try {
       const payload = JSON.parse(e.data)
-      console.log('[WS_MESSAGE]:', payload)
-
       window.__ARCADE_INPUT__?.(payload)
     } catch {}
   }
 
-  ws.onclose = () => {
-    console.log('[WS_CLOSE]')
+  events.onerror = () => {
+    events.close()
     setTimeout(connect, 1000)
-  }
-
-  ws.onerror = error => {
-    console.log('[WS_ERROR]:', error)
-
-    ws.close()
   }
 }
 

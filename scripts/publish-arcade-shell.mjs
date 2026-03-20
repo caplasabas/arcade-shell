@@ -37,6 +37,12 @@ function readJson(filePath, label) {
   }
 }
 
+function readPackageVersion() {
+  const packageJsonPath = path.resolve('package.json')
+  const packageJson = readJson(packageJsonPath, 'package.json')
+  return String(packageJson?.version || '').trim()
+}
+
 async function uploadFile({ url, body, contentType, serviceKey, label }) {
   const response = await fetch(url, {
     method: 'POST',
@@ -64,21 +70,11 @@ const metadataPath = process.env.ARCADE_SHELL_METADATA_PATH || 'arcade-shell/lat
 const shellId = process.env.ARCADE_SHELL_ID || 'arcade-shell'
 const version =
   process.env.ARCADESHELL_VERSION ||
-  (() => {
-    const result = spawnSync('git', ['describe', '--tags', '--always', '--dirty'], {
-      encoding: 'utf8',
-    })
-
-    if (result.status !== 0) {
-      fail('unable to determine version via git describe', result.status || 1)
-    }
-
-    return result.stdout.trim()
-  })()
+  readPackageVersion()
 
 if (!supabaseUrl) fail('SUPABASE_URL is required')
 if (!serviceKey) fail('SUPABASE_SERVICE_ROLE_KEY is required')
-if (!version) fail('ARCADESHELL_VERSION is required')
+if (!version) fail('ARCADESHELL_VERSION or package.json version is required')
 
 const env = {
   ...process.env,

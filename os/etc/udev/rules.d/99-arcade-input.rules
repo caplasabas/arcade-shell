@@ -1,0 +1,20 @@
+SUBSYSTEM=="input", ATTRS{name}=="DragonRise Inc.*", MODE="0600", OWNER="arcade1"
+
+# Cabinet mapping:
+#   1-1 = P1
+#   3-1 = P2
+#   3-2 = casino
+SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{idVendor}=="0079", ATTRS{idProduct}=="0006", \
+  KERNELS=="1-1", \
+  SYMLINK+="input/player1"
+
+SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{idVendor}=="0079", ATTRS{idProduct}=="0006", \
+  KERNELS=="3-1", \
+  SYMLINK+="input/player2"
+
+SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{idVendor}=="0079", ATTRS{idProduct}=="0006", \
+  KERNELS=="3-2", \
+  SYMLINK+="input/casino"

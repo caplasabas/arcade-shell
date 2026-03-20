@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${ARCADESHELL_VERSION:-$(git -C "$ROOT_DIR" describe --tags --always --dirty)}"
+PACKAGE_VERSION="$(node -p "require('$ROOT_DIR/package.json').version")"
+VERSION="${ARCADESHELL_VERSION:-$PACKAGE_VERSION}"
 BUILD_UI="${ARCADESHELL_BUILD_UI:-1}"
 BUILD_SERVICE_BUNDLE="${ARCADESHELL_BUILD_SERVICE_BUNDLE:-1}"
 INCLUDE_ROMS="${ARCADESHELL_INCLUDE_ROMS:-0}"
@@ -138,9 +139,12 @@ fi
 required_runtime_files=(
   "$RELEASE_UI_DIST_DIR/index.html"
   "$RELEASE_UI_DIST_DIR/arcade-shell-build.json"
+  "$RELEASE_UI_DIST_DIR/retro-overlay.html"
   "$RELEASE_SERVICE_DIR/input.bundle.cjs"
   "$RELEASE_BIN_DIR/uinput-helper.c"
   "$RELEASE_OS_DIR/.xinitrc"
+  "$RELEASE_OS_DIR/bin/arcade-retro-launch.sh"
+  "$RELEASE_OS_DIR/bin/arcade-retro-session.sh"
   "$RELEASE_OS_DIR/boot/boot.png"
   "$RELEASE_OS_DIR/boot/config.txt"
   "$RELEASE_OS_DIR/boot/cmdline.txt"

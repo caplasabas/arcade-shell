@@ -4,7 +4,6 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { pipeline } from 'node:stream/promises'
 import { spawnSync } from 'node:child_process'
 
 const args = process.argv.slice(2)
@@ -75,15 +74,22 @@ function run(cmd, argv, options = {}) {
   }
 }
 
-function isAbortError(error) {
-  return error?.name === 'AbortError'
+function restartManagedServices(serviceNames) {
+  const names = Array.isArray(serviceNames)
+    ? serviceNames.map(value => String(value || '').trim()).filter(Boolean)
+    : []
+
+  if (names.length === 0) return
+
+  console.log(`[arcade-shell-updater] restarting services: ${names.join(', ')}`)
+  run('systemctl', ['--no-block', 'restart', ...names])
 }
 
 function isNetworkError(error) {
-  if (isAbortError(error)) return true
   const message = String(error?.message || '').toLowerCase()
   return (
     message.includes('fetch failed') ||
+    message.includes('curl') ||
     message.includes('network') ||
     message.includes('timed out') ||
     message.includes('timeout') ||
@@ -102,20 +108,6 @@ function isUnmanagedLocalBuild(version) {
   return /^[0-9a-f]{7,}$/.test(value)
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
-
-  try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    })
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
 async function sha256(filePath) {
   return new Promise((resolve, reject) => {
     const hash = createHash('sha256')
@@ -127,27 +119,88 @@ async function sha256(filePath) {
 }
 
 async function downloadToFile(url, destination, timeoutMs) {
-  const response = await fetchWithTimeout(
-    url,
+  await fsp.mkdir(path.dirname(destination), { recursive: true })
+  const result = spawnSync(
+    'curl',
+    [
+      '-sS',
+      '-L',
+      '--fail',
+      '--max-time',
+      String(Math.max(1, Math.ceil(timeoutMs / 1000))),
+      '-H',
+      'Cache-Control: no-cache',
+      '-o',
+      destination,
+      url,
+    ],
     {
-      headers: {
-        'Cache-Control': 'no-cache',
-      },
+      encoding: 'utf8',
     },
-    timeoutMs,
   )
 
-  if (!response.ok) {
-    throw new Error(`failed to download ${url} (${response.status})`)
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`curl download failed for ${url}: ${String(result.stderr || '').trim()}`)
+  }
+}
+
+function requestJsonWithCurl(url, { method = 'GET', headers = {}, body = null, timeoutMs = 12000 } = {}) {
+  const args = [
+    '-sS',
+    '-L',
+    '--max-time',
+    String(Math.max(1, Math.ceil(timeoutMs / 1000))),
+    '--write-out',
+    '\n%{http_code}',
+  ]
+
+  if (method && method !== 'GET') {
+    args.push('-X', method)
   }
 
-  await fsp.mkdir(path.dirname(destination), { recursive: true })
-  const fileStream = fs.createWriteStream(destination)
-  await pipeline(response.body, fileStream)
+  for (const [key, value] of Object.entries(headers)) {
+    args.push('-H', `${key}: ${value}`)
+  }
+
+  if (body !== null && body !== undefined) {
+    args.push('--data-binary', typeof body === 'string' ? body : JSON.stringify(body))
+  }
+
+  args.push(url)
+
+  const result = spawnSync('curl', args, {
+    encoding: 'utf8',
+    maxBuffer: 8 * 1024 * 1024,
+  })
+
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    throw new Error(`curl request failed for ${url}: ${String(result.stderr || '').trim()}`)
+  }
+
+  const output = String(result.stdout || '')
+  const splitIndex = output.lastIndexOf('\n')
+  const text = splitIndex >= 0 ? output.slice(0, splitIndex) : output
+  const statusRaw = splitIndex >= 0 ? output.slice(splitIndex + 1).trim() : ''
+  const status = Number.parseInt(statusRaw, 10)
+
+  if (!Number.isFinite(status)) {
+    throw new Error(`curl response missing status for ${url}`)
+  }
+
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text,
+    json() {
+      return text ? JSON.parse(text) : null
+    },
+  }
 }
 
 async function listBucketPrefix({ supabaseUrl, bucket, prefix, serviceKey, timeoutMs }) {
-  const response = await fetchWithTimeout(
+  const response = requestJsonWithCurl(
     `${normalizeUrl(supabaseUrl)}/storage/v1/object/list/${normalizePathFragment(bucket)}`,
     {
       method: 'POST',
@@ -162,8 +215,8 @@ async function listBucketPrefix({ supabaseUrl, bucket, prefix, serviceKey, timeo
         offset: 0,
         sortBy: { column: 'name', order: 'asc' },
       }),
+      timeoutMs,
     },
-    timeoutMs,
   )
 
   if (!response.ok) {
@@ -325,6 +378,11 @@ async function installRuntimePayload(stagingDir, installDir) {
     await copyTreeContents(osSource, path.join(installDir, 'os'), {
       excludes: ['.env.arcade-service'],
     })
+
+    const osBinDir = path.join(installDir, 'os', 'bin')
+    if (await fileExists(osBinDir)) {
+      run('sh', ['-lc', `find '${osBinDir}' -type f -name '*.sh' -exec chmod 0755 {} +`])
+    }
   }
 
   if (await fileExists(romsSource)) {
@@ -421,13 +479,10 @@ async function syncPublicRoms({ supabaseUrl, installDir, networkTimeoutMs }) {
 
   let response
   try {
-    response = await fetchWithTimeout(
-      manifestUrl,
-      {
-        headers: { 'Cache-Control': 'no-cache' },
-      },
-      networkTimeoutMs,
-    )
+    response = requestJsonWithCurl(manifestUrl, {
+      headers: { 'Cache-Control': 'no-cache' },
+      timeoutMs: networkTimeoutMs,
+    })
   } catch (error) {
     if (isNetworkError(error)) {
       console.log(
@@ -440,7 +495,7 @@ async function syncPublicRoms({ supabaseUrl, installDir, networkTimeoutMs }) {
 
   let entries = []
   if (response.ok) {
-    const manifest = await response.json()
+    const manifest = response.json()
     entries = getRomManifestEntries(manifest, supabaseUrl, romBucket)
   } else if (response.status >= 400 && response.status < 500) {
     if (!serviceKey) {
@@ -551,13 +606,10 @@ async function maybeInstallShellUpdate({
 
   let metadataResponse
   try {
-    metadataResponse = await fetchWithTimeout(
-      metadataUrl,
-      {
-        headers: { 'Cache-Control': 'no-cache' },
-      },
-      networkTimeoutMs,
-    )
+    metadataResponse = requestJsonWithCurl(metadataUrl, {
+      headers: { 'Cache-Control': 'no-cache' },
+      timeoutMs: networkTimeoutMs,
+    })
   } catch (error) {
     if (isNetworkError(error)) {
       console.log(
@@ -582,7 +634,7 @@ async function maybeInstallShellUpdate({
     throw new Error(`failed to fetch metadata (${metadataResponse.status})`)
   }
 
-  const metadata = await metadataResponse.json()
+  const metadata = metadataResponse.json()
   const requiredVersion = String(metadata.version || '').trim()
   const packageUrl = String(metadata.package_url || metadata.packageUrl || '').trim()
   const expectedChecksum = String(metadata.checksum || metadata.sha256 || '').trim()
@@ -738,10 +790,13 @@ async function main() {
     networkTimeoutMs,
   })
 
-  if (serviceNames.length > 0) {
-    console.log(
-      `[arcade-shell-updater] skipping in-process restarts for: ${serviceNames.join(', ')}`,
-    )
+  if (shellUpdated && serviceNames.length > 0) {
+    emitStatus({
+      phase: 'shell-restart',
+      label: 'Restarting services',
+      detail: serviceNames.join(', '),
+    })
+    restartManagedServices(serviceNames)
   }
 
   await syncPublicRoms({ supabaseUrl, installDir, networkTimeoutMs })

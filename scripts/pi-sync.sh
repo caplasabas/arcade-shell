@@ -22,6 +22,8 @@ PI_REMOTE_RUNTIME_SERVICE_DIR="${PI_REMOTE_RUNTIME_SERVICE_DIR:-$PI_REMOTE_RUNTI
 PI_REMOTE_RUNTIME_BIN_DIR="${PI_REMOTE_RUNTIME_BIN_DIR:-$PI_REMOTE_RUNTIME_DIR/bin}"
 PI_REMOTE_RUNTIME_OS_DIR="${PI_REMOTE_RUNTIME_OS_DIR:-$PI_REMOTE_RUNTIME_DIR/os}"
 PI_REMOTE_RUNTIME_ROMS_DIR="${PI_REMOTE_RUNTIME_ROMS_DIR:-$PI_REMOTE_RUNTIME_DIR/roms}"
+PI_REMOTE_USER_HOME="${PI_REMOTE_USER_HOME:-/home/arcade1}"
+PI_REMOTE_USER_NAME="${PI_REMOTE_USER_NAME:-arcade1}"
 
 PI_BUILD_UI="${PI_BUILD_UI:-1}"
 PI_BUILD_INPUT="${PI_BUILD_INPUT:-1}"
@@ -39,6 +41,8 @@ PI_RESTART_KIOSK="${PI_RESTART_KIOSK:-1}"
 PI_REMOTE_CLEANUP_STAGE="${PI_REMOTE_CLEANUP_STAGE:-1}"
 PI_INPUT_SERVICE="${PI_INPUT_SERVICE:-arcade-input.service}"
 PI_KIOSK_SERVICE="${PI_KIOSK_SERVICE:-arcade-ui.service}"
+PI_MARK_LOCAL_BUILD="${PI_MARK_LOCAL_BUILD:-1}"
+PI_LOCAL_BUILD_VERSION="${PI_LOCAL_BUILD_VERSION:-local-dirty}"
 
 LOCAL_BUILD_DIR="${PI_LOCAL_BUILD_DIR:-$ROOT_DIR/.pi-sync-build}"
 LOCAL_UI_DIST_DIR="$ROOT_DIR/apps/ui/dist"
@@ -238,6 +242,8 @@ PI_REMOTE_RUNTIME_SERVICE_DIR="$PI_REMOTE_RUNTIME_SERVICE_DIR"
 PI_REMOTE_RUNTIME_BIN_DIR="$PI_REMOTE_RUNTIME_BIN_DIR"
 PI_REMOTE_RUNTIME_OS_DIR="$PI_REMOTE_RUNTIME_OS_DIR"
 PI_REMOTE_RUNTIME_ROMS_DIR="$PI_REMOTE_RUNTIME_ROMS_DIR"
+PI_REMOTE_USER_HOME="$PI_REMOTE_USER_HOME"
+PI_REMOTE_USER_NAME="$PI_REMOTE_USER_NAME"
 PI_BUILD_UI="$PI_BUILD_UI"
 PI_BUILD_INPUT="$PI_BUILD_INPUT"
 PI_BUILD_UINPUT_HELPER="$PI_BUILD_UINPUT_HELPER"
@@ -254,6 +260,8 @@ PI_RESTART_KIOSK="$PI_RESTART_KIOSK"
 PI_REMOTE_CLEANUP_STAGE="$PI_REMOTE_CLEANUP_STAGE"
 PI_INPUT_SERVICE="$PI_INPUT_SERVICE"
 PI_KIOSK_SERVICE="$PI_KIOSK_SERVICE"
+PI_MARK_LOCAL_BUILD="$PI_MARK_LOCAL_BUILD"
+PI_LOCAL_BUILD_VERSION="$PI_LOCAL_BUILD_VERSION"
 
 sudo_cmd() {
   if command -v sudo >/dev/null 2>&1; then
@@ -328,6 +336,14 @@ if [[ "\$PI_SYNC_OS" == "1" ]]; then
   echo "[pi-sync:remote] Installing os payload -> \$PI_REMOTE_RUNTIME_OS_DIR"
   sudo_cmd mkdir -p "\$PI_REMOTE_RUNTIME_OS_DIR"
   sudo_cmd rsync -a --delete --exclude '.env.arcade-service' "\$PI_REMOTE_STAGE_DIR/os/" "\$PI_REMOTE_RUNTIME_OS_DIR/"
+  if [[ -d "\$PI_REMOTE_RUNTIME_OS_DIR/bin" ]]; then
+    sudo_cmd find "\$PI_REMOTE_RUNTIME_OS_DIR/bin" -type f -name '*.sh' -exec chmod 0755 {} +
+  fi
+  if [[ -f "\$PI_REMOTE_RUNTIME_OS_DIR/.xinitrc" ]]; then
+    echo "[pi-sync:remote] Installing session file -> \$PI_REMOTE_USER_HOME/.xinitrc"
+    sudo_cmd install -D -m 0755 "\$PI_REMOTE_RUNTIME_OS_DIR/.xinitrc" "\$PI_REMOTE_USER_HOME/.xinitrc"
+    sudo_cmd chown "\$PI_REMOTE_USER_NAME:\$PI_REMOTE_USER_NAME" "\$PI_REMOTE_USER_HOME/.xinitrc"
+  fi
 fi
 
 if [[ "\$PI_SYNC_ARCADE_SERVICE_ENV" == "1" && -f "\$PI_REMOTE_STAGE_DIR/os/.env.arcade-service" ]]; then
@@ -364,6 +380,12 @@ if [[ "\$PI_INSTALL_SYSTEMD_UNITS" == "1" && -d "\$PI_REMOTE_RUNTIME_OS_DIR/syst
   for unit_file in "\${unit_files[@]}"; do
     sudo_cmd install -D -m 0644 "\$unit_file" "/etc/systemd/system/\$(basename "\$unit_file")"
   done
+fi
+
+if [[ "\$PI_MARK_LOCAL_BUILD" == "1" ]]; then
+  echo "[pi-sync:remote] Marking runtime as local build -> \$PI_REMOTE_RUNTIME_OS_DIR/.arcade-shell-version"
+  sudo_cmd mkdir -p "\$PI_REMOTE_RUNTIME_OS_DIR"
+  printf '%s\n' "\$PI_LOCAL_BUILD_VERSION" | sudo_cmd tee "\$PI_REMOTE_RUNTIME_OS_DIR/.arcade-shell-version" >/dev/null
 fi
 
 if [[ "\$PI_DAEMON_RELOAD" == "1" ]]; then

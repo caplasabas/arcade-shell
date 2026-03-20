@@ -9,8 +9,7 @@
  */
 
 import http from 'http'
-import { WebSocketServer } from 'ws'
-import { exec, spawn, spawnSync } from 'child_process'
+import { exec, execFile, spawn, spawnSync } from 'child_process'
 import { createDecipheriv, createHash } from 'crypto'
 import dgram from 'dgram'
 import net from 'net'
@@ -151,13 +150,83 @@ let arcadeShellUpdateState = {
   exitCode: null,
 }
 
+function execFileAsync(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      file,
+      args,
+      {
+        maxBuffer: 1024 * 1024,
+        ...options,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          error.stdout = stdout
+          error.stderr = stderr
+          reject(error)
+          return
+        }
+        resolve({ stdout, stderr })
+      },
+    )
+  })
+}
+
+async function requestJsonWithCurl(url, { method = 'GET', body = null, headers = {}, timeoutMs = 2500 } = {}) {
+  const args = [
+    '-sS',
+    '-L',
+    '--max-time',
+    String(Math.max(1, Math.ceil(timeoutMs / 1000))),
+    '--write-out',
+    '\n%{http_code}',
+  ]
+
+  if (method && method !== 'GET') {
+    args.push('-X', method)
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    args.push('-H', `${key}: ${value}`)
+  }
+
+  if (body !== null && body !== undefined) {
+    args.push('--data-binary', typeof body === 'string' ? body : JSON.stringify(body))
+  }
+
+  args.push(url)
+
+  const { stdout } = await execFileAsync('curl', args)
+  const text = String(stdout || '')
+  const splitIndex = text.lastIndexOf('\n')
+  const responseText = splitIndex >= 0 ? text.slice(0, splitIndex) : text
+  const statusRaw = splitIndex >= 0 ? text.slice(splitIndex + 1).trim() : ''
+  const status = Number.parseInt(statusRaw, 10)
+
+  if (!Number.isFinite(status)) {
+    throw new Error(`curl response missing status for ${url}`)
+  }
+
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: responseText,
+    json() {
+      return responseText ? JSON.parse(responseText) : null
+    },
+  }
+}
+
 const GAME_VT = process.env.ARCADE_GAME_VT || '1'
 const UI_VT = process.env.ARCADE_UI_VT || '2'
+const SPLASH_VT = process.env.ARCADE_SPLASH_VT || '3'
 const RETROARCH_STOP_GRACE_MS = 3000
 const RETROARCH_LOG_PATH = '/tmp/retroarch.log'
 const RETROARCH_TERM_FALLBACK_MS = 1200
 const SINGLE_X_MODE = process.env.RETROARCH_SINGLE_X === '1'
 const RETROARCH_USE_TTY_MODE = !SINGLE_X_MODE && process.env.RETROARCH_TTY_MODE === '1'
+const RETROARCH_TTY_X_SESSION = !SINGLE_X_MODE && process.env.RETROARCH_TTY_X_SESSION === '1'
+const RETROARCH_TTY_X_PREWARM = !SINGLE_X_MODE && process.env.RETROARCH_TTY_X_PREWARM !== '0'
 const RETROARCH_RUN_USER = process.env.RETROARCH_RUN_USER || 'arcade1'
 const RETROARCH_RUN_UID = String(process.env.RETROARCH_RUN_UID || '1000')
 const RETROARCH_RUN_HOME = process.env.RETROARCH_RUN_HOME || `/home/${RETROARCH_RUN_USER}`
@@ -178,6 +247,7 @@ const SUPABASE_SERVICE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '')
 console.log('[RETRO MODE]', {
   SINGLE_X_MODE,
   RETROARCH_USE_TTY_MODE,
+  RETROARCH_TTY_X_SESSION,
   DISPLAY: process.env.DISPLAY || null,
   XAUTHORITY: process.env.XAUTHORITY || null,
 })
@@ -189,6 +259,10 @@ function parseNonNegativeMs(value, fallback) {
 }
 
 const RETROARCH_EXIT_GUARD_MS = parseNonNegativeMs(process.env.RETROARCH_EXIT_GUARD_MS, 1500)
+const RETROARCH_START_INPUT_GUARD_MS = parseNonNegativeMs(
+  process.env.RETROARCH_START_INPUT_GUARD_MS,
+  6500,
+)
 const RETROARCH_EXIT_CONFIRM_WINDOW_MS = parseNonNegativeMs(
   process.env.RETROARCH_EXIT_CONFIRM_WINDOW_MS,
   2500,
@@ -201,6 +275,8 @@ const RETROARCH_CONFIG_PATH = process.env.RETROARCH_CONFIG_PATH || ''
 const RESTART_UI_ON_EXIT = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.ARCADE_RESTART_UI_ON_GAME_EXIT || '').toLowerCase(),
 )
+const KEEP_UI_ALIVE_DURING_TTY_X = process.env.ARCADE_UI_KEEPALIVE_DURING_TTY_X !== '0'
+const USE_SPLASH_TRANSITIONS = process.env.ARCADE_SPLASH_TRANSITIONS === '1'
 const UI_RESTART_COOLDOWN_MS = parseNonNegativeMs(process.env.ARCADE_UI_RESTART_COOLDOWN_MS, 4000)
 const LIBRETRO_DIR_CANDIDATES = [
   process.env.RETROARCH_CORE_DIR,
@@ -240,21 +316,21 @@ const RETROARCH_OSD_COMMAND = String(process.env.RETROARCH_OSD_COMMAND || 'AUTO'
   .toUpperCase()
 const ARCADE_RETRO_OSD_COOLDOWN_MS = parseNonNegativeMs(
   process.env.ARCADE_RETRO_OSD_COOLDOWN_MS,
-  250,
+  750,
 )
 const ARCADE_RETRO_OSD_RETRY_INTERVAL_MS = parseNonNegativeMs(
   process.env.ARCADE_RETRO_OSD_RETRY_INTERVAL_MS,
   180,
 )
 const ARCADE_RETRO_OSD_RETRY_COUNT = (() => {
-  const parsed = Number(process.env.ARCADE_RETRO_OSD_RETRY_COUNT || 2)
-  if (!Number.isFinite(parsed)) return 2
+  const parsed = Number(process.env.ARCADE_RETRO_OSD_RETRY_COUNT || 1)
+  if (!Number.isFinite(parsed)) return 1
   return Math.max(1, Math.min(8, Math.round(parsed)))
 })()
 const ARCADE_RETRO_OSD_PROMPT_PERSIST = process.env.ARCADE_RETRO_OSD_PROMPT_PERSIST !== '0'
 const ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS = parseNonNegativeMs(
   process.env.ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS,
-  400,
+  1200,
 )
 const ARCADE_RETRO_OSD_PROMPT_BLINK = process.env.ARCADE_RETRO_OSD_PROMPT_BLINK === '1'
 const ARCADE_RETRO_OSD_STYLE = (() => {
@@ -298,6 +374,9 @@ let lastUiVT = UI_VT
 let lastUiRestartAt = 0
 
 let chromiumUiHidden = false
+let arcadeUiStoppedForRetroarch = false
+let splashStartedForRetroarch = false
+let retroXWarmRequested = false
 
 function getXClientEnv() {
   return {
@@ -324,6 +403,92 @@ function runXClientCommand(command, args, label) {
     console.warn(`[UI] ${label} failed: ${err.message}`)
     return false
   }
+}
+
+function stopArcadeUiForRetroarch() {
+  if (!RETROARCH_TTY_X_SESSION) return
+  if (arcadeUiStoppedForRetroarch) return
+  if (KEEP_UI_ALIVE_DURING_TTY_X) {
+    console.log('[UI] keeping arcade-ui.service alive during tty X RetroArch launch')
+    return
+  }
+
+  const proc = spawn('systemctl', ['stop', '--no-block', 'arcade-ui.service'], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  proc.unref()
+  arcadeUiStoppedForRetroarch = true
+  console.log('[UI] stop requested before tty X RetroArch launch')
+}
+
+function restartArcadeUiAfterRetroarch(reason) {
+  if (!RETROARCH_TTY_X_SESSION) return
+  if (KEEP_UI_ALIVE_DURING_TTY_X) {
+    console.log(`[UI] arcade-ui.service kept alive during tty X RetroArch session (${reason})`)
+    return
+  }
+  if (!arcadeUiStoppedForRetroarch) return
+
+  arcadeUiStoppedForRetroarch = false
+  const proc = spawn('systemctl', ['start', '--no-block', 'arcade-ui.service'], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  proc.unref()
+  console.log(`[UI] start requested after tty X RetroArch exit (${reason})`)
+}
+
+function ensureRetroXWarm(reason = 'boot') {
+  if (!RETROARCH_TTY_X_SESSION) return
+  if (!RETROARCH_TTY_X_PREWARM) return
+  if (retroXWarmRequested) return
+
+  const proc = spawn('systemctl', ['start', '--no-block', 'arcade-retro-x.service'], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  proc.unref()
+  retroXWarmRequested = true
+  console.log(`[RETRO-X] warm start requested (${reason})`)
+}
+
+function startSplashForRetroarch() {
+  if (!USE_SPLASH_TRANSITIONS) return
+  if (splashStartedForRetroarch) return
+
+  const proc = spawn('systemctl', ['start', '--no-block', 'arcade-splash.service'], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  proc.unref()
+  splashStartedForRetroarch = true
+  console.log('[SPLASH] start requested for RetroArch transition')
+}
+
+function stopSplashForRetroarch(reason) {
+  if (!splashStartedForRetroarch) return
+
+  splashStartedForRetroarch = false
+  const proc = spawn('systemctl', ['stop', '--no-block', 'arcade-splash.service'], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  proc.unref()
+  console.log(`[SPLASH] stop requested after RetroArch transition (${reason})`)
+}
+
+function ensureSplashReady(reason = 'boot') {
+  if (!USE_SPLASH_TRANSITIONS) return
+  if (splashStartedForRetroarch) return
+
+  const proc = spawn('systemctl', ['start', '--no-block', 'arcade-splash.service'], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  proc.unref()
+  splashStartedForRetroarch = true
+  console.log(`[SPLASH] warm start requested (${reason})`)
 }
 
 function hasCommand(name) {
@@ -445,9 +610,13 @@ USB Encoder : /dev/input/casino
 GPIO Chip   : ${GPIOCHIP}
 Runtime Mode: ${IS_PI ? 'Raspberry Pi (hardware)' : `compat (${process.platform})`}
 Display Mode : ${SINGLE_X_MODE ? 'single-x(:0)' : `tty ui=${UI_VT} game=${GAME_VT}`}
+Splash VT    : ${SPLASH_VT}
+UI Keepalive : ${KEEP_UI_ALIVE_DURING_TTY_X ? 'tty-x on' : 'tty-x off'}
+Splash Transit: ${USE_SPLASH_TRANSITIONS ? 'enabled' : 'disabled'}
 Retro P1 In : ${RETROARCH_PRIMARY_INPUT}
 Casino Exit : ${CASINO_MENU_EXITS_RETROARCH ? 'enabled' : 'disabled'}
 Exit Guard  : ${RETROARCH_EXIT_GUARD_MS}ms
+Start Guard : ${RETROARCH_START_INPUT_GUARD_MS}ms
 Exit Confirm: ${RETROARCH_EXIT_CONFIRM_WINDOW_MS}ms
 Exit Cooldown: ${RETROARCH_POST_EXIT_LAUNCH_COOLDOWN_MS}ms
 RA Config   : ${RETROARCH_CONFIG_PATH || '(default)'}
@@ -466,45 +635,28 @@ Supabase RPC: ${SUPABASE_URL ? 'configured' : 'missing'} / key=${SUPABASE_SERVIC
 Ctrl+C to exit
 `)
 
-const wss = new WebSocketServer({ port: 5175 })
+ensureSplashReady()
+ensureRetroXWarm()
 
-wss.on('error', err => {
-  console.error('[WS SERVER ERROR]', err)
-})
+const sseClients = new Set()
 
-wss.on('listening', () => {
-  console.log('[WS] listening on port 5175')
-})
-
-wss.on('connection', async ws => {
-  console.log('[WS] client connected')
-
-  const online = await checkInternetOnce()
-  ws.send(
-    JSON.stringify({
-      type: online ? 'INTERNET_OK' : 'INTERNET_LOST',
-    }),
-  )
-
-  ws.on('close', () => {
-    console.log('[WS] client disconnected')
-  })
-
-  ws.on('error', err => {
-    console.error('[WS CLIENT ERROR]', err.message)
-  })
-})
+function sendSse(res, payload) {
+  try {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`)
+    return true
+  } catch (err) {
+    console.error('[SSE SEND ERROR]', err.message)
+    return false
+  }
+}
 
 function broadcast(payload) {
-  const data = JSON.stringify(payload)
-
-  for (const client of wss.clients) {
-    if (client.readyState === 1) {
+  for (const client of [...sseClients]) {
+    if (!sendSse(client, payload)) {
       try {
-        client.send(data)
-      } catch (err) {
-        console.error('[WS SEND ERROR]', err.message)
-      }
+        client.end()
+      } catch {}
+      sseClients.delete(client)
     }
   }
 }
@@ -606,16 +758,32 @@ function normalizeArcadePlayer(source) {
   return null
 }
 
-function sendRetroarchNetCommand(command) {
+function sendRetroarchNetCommand(command, options = {}) {
   if (!ARCADE_RETRO_OSD_ENABLED) return
   if (!retroarchActive) return
-  if (!Number.isFinite(RETROARCH_NETCMD_PORT) || RETROARCH_NETCMD_PORT <= 0) return
 
   const clean = String(command || '').trim()
   const message = `${clean}\n`
   if (!message.trim()) return
+  const urgent = options?.urgent === true
+  const retryCount = urgent ? 3 : ARCADE_RETRO_OSD_RETRY_COUNT
+  const retryIntervalMs = urgent ? 60 : ARCADE_RETRO_OSD_RETRY_INTERVAL_MS
+
+  const sendViaStdin = attempt => {
+    if (!retroarchProcess?.stdin?.writable) return false
+    try {
+      retroarchProcess.stdin.write(message)
+      console.log(`[RETROARCH OSD] #${attempt}/${retryCount}${urgent ? ' urgent' : ''} stdin ${clean}`)
+      return true
+    } catch (err) {
+      console.error('[RETROARCH OSD] stdin send failed', err?.message || err)
+      return false
+    }
+  }
 
   const sendOnce = attempt => {
+    if (sendViaStdin(attempt)) return
+    if (!Number.isFinite(RETROARCH_NETCMD_PORT) || RETROARCH_NETCMD_PORT <= 0) return
     const udpSocket = dgram.createSocket('udp4')
     const udpPayload = Buffer.from(message, 'utf8')
     udpSocket.send(udpPayload, RETROARCH_NETCMD_PORT, RETROARCH_NETCMD_HOST, err => {
@@ -624,28 +792,11 @@ function sendRetroarchNetCommand(command) {
       }
       udpSocket.close()
     })
-
-    const tcpSocket = net.createConnection(
-      {
-        host: RETROARCH_NETCMD_HOST,
-        port: RETROARCH_NETCMD_PORT,
-      },
-      () => {
-        tcpSocket.write(message, () => tcpSocket.end())
-      },
-    )
-    tcpSocket.setTimeout(300)
-    tcpSocket.on('error', () => {
-      // UDP path may still succeed; keep this quiet.
-    })
-    tcpSocket.on('timeout', () => {
-      tcpSocket.destroy()
-    })
-    console.log(`[RETROARCH OSD] #${attempt}/${ARCADE_RETRO_OSD_RETRY_COUNT} ${clean}`)
+    console.log(`[RETROARCH OSD] #${attempt}/${retryCount}${urgent ? ' urgent' : ''} ${clean}`)
   }
 
-  for (let attempt = 1; attempt <= ARCADE_RETRO_OSD_RETRY_COUNT; attempt += 1) {
-    const delay = (attempt - 1) * ARCADE_RETRO_OSD_RETRY_INTERVAL_MS
+  for (let attempt = 1; attempt <= retryCount; attempt += 1) {
+    const delay = (attempt - 1) * retryIntervalMs
     if (delay <= 0) {
       sendOnce(attempt)
       continue
@@ -662,6 +813,7 @@ function showArcadeOsdMessage(message, options = {}) {
 
   const allowBlank = options?.allowBlank === true
   const bypassCooldown = options?.bypassCooldown === true
+  const urgent = options?.urgent === true
   const source = String(message || '').replace(/[\r\n\t]/g, ' ')
   const normalized =
     ARCADE_RETRO_OSD_STYLE === 'footer'
@@ -680,9 +832,9 @@ function showArcadeOsdMessage(message, options = {}) {
   lastArcadeOsdAt = now
 
   const osdCommands = (() => {
-    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MSG', 'SHOW_MESG']
-    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG']
-    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG']
+    if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MESG', 'SHOW_MSG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG', 'SHOW_MESG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG', 'SHOW_MSG']
     return [RETROARCH_OSD_COMMAND]
   })()
 
@@ -691,7 +843,7 @@ function showArcadeOsdMessage(message, options = {}) {
     if (seen.has(osdCommand)) continue
     seen.add(osdCommand)
     const command = text ? `${osdCommand} ${text}` : osdCommand
-    sendRetroarchNetCommand(command)
+    sendRetroarchNetCommand(command, { urgent })
   }
 }
 
@@ -734,25 +886,10 @@ function composeArcadeOsdOverlay(message, balanceOverride = null, options = null
   const balanceBanner = `Balance ₱${balanceText}`
 
   if (ARCADE_RETRO_OSD_STYLE === 'footer') {
-    const now = Date.now()
-    const p1Ready = Boolean(arcadeSession.playerUnlocked?.P1)
-    const p2Ready = Boolean(arcadeSession.playerUnlocked?.P2)
-
-    const p1ConfirmArmed = Number(arcadeSession.startConfirmUntil?.P1 || 0) > now
-    const p2ConfirmArmed = Number(arcadeSession.startConfirmUntil?.P2 || 0) > now
-    const exitConfirmArmed = Number(retroarchExitConfirmUntil || 0) > now
-
-    const p1HasCredit = Number(arcadeSession.playerLivesPurchased?.P1 || 0) > 0
-    const p2HasCredit = Number(arcadeSession.playerLivesPurchased?.P2 || 0) > 0
-
-    const leftBase = p1HasCredit ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
-    const centerBase = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
-    const rightBase = p2HasCredit ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
-
-    const leftText = arcadeOverlayNotice?.slot === 'left' ? arcadeOverlayNotice.text : leftBase
-    const centerText =
-      arcadeOverlayNotice?.slot === 'center' ? arcadeOverlayNotice.text : centerBase
-    const rightText = arcadeOverlayNotice?.slot === 'right' ? arcadeOverlayNotice.text : rightBase
+    const footerState = getArcadeRetroFooterState(balanceOverride)
+    const leftText = footerState.leftText
+    const centerText = footerState.centerText
+    const rightText = footerState.rightText
 
     const centerIn = (txt, w) => {
       const clean = String(txt || '')
@@ -789,6 +926,60 @@ function composeArcadeOsdOverlay(message, balanceOverride = null, options = null
   }
 
   return `${arcadeOverlayNotice || base} | P1:${p1Lives} P2:${p2Lives} Balance:P${balanceText}`
+}
+
+function getArcadeRetroFooterState(balanceOverride = null) {
+  const rawBalance =
+    balanceOverride === null || balanceOverride === undefined
+      ? arcadeSession?.lastKnownBalance
+      : balanceOverride
+  const balanceText = formatArcadeBalanceForOsd(rawBalance)
+  const now = Date.now()
+  const p1ConfirmArmed = Number(arcadeSession?.startConfirmUntil?.P1 || 0) > now
+  const p2ConfirmArmed = Number(arcadeSession?.startConfirmUntil?.P2 || 0) > now
+  const exitConfirmArmed = Number(retroarchExitConfirmUntil || 0) > now
+  const p1HasCredit = Number(arcadeSession?.playerLivesPurchased?.P1 || 0) > 0
+  const p2HasCredit = Number(arcadeSession?.playerLivesPurchased?.P2 || 0) > 0
+
+  const leftBase = p1HasCredit ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+  const centerBase = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
+  const rightBase = p2HasCredit ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+
+  return {
+    active: Boolean(arcadeSession?.active),
+    gameName: arcadeSession?.gameName || null,
+    balanceText,
+    leftText: arcadeOverlayNotice?.slot === 'left' ? arcadeOverlayNotice.text : leftBase,
+    centerText: arcadeOverlayNotice?.slot === 'center' ? arcadeOverlayNotice.text : centerBase,
+    rightText: arcadeOverlayNotice?.slot === 'right' ? arcadeOverlayNotice.text : rightBase,
+    p1HasCredit,
+    p2HasCredit,
+    p1ConfirmArmed,
+    p2ConfirmArmed,
+    exitConfirmArmed,
+    notice: arcadeOverlayNotice
+      ? {
+          text: arcadeOverlayNotice.text,
+          slot: arcadeOverlayNotice.slot,
+        }
+      : null,
+  }
+}
+
+function getArcadeRetroOverlayState() {
+  return {
+    active: Boolean(arcadeSession?.active),
+    retroarchActive,
+    gameName: arcadeSession?.gameName || null,
+    gameId: arcadeSession?.gameId || null,
+    pricePerLife: arcadeSession?.active ? getArcadeSessionPrice() : null,
+    balance:
+      arcadeSession?.lastKnownBalance === null || arcadeSession?.lastKnownBalance === undefined
+        ? null
+        : arcadeSession.lastKnownBalance,
+    footer: getArcadeRetroFooterState(),
+    updatedAt: Date.now(),
+  }
 }
 
 function pulseVirtualKey(proc, keyCode, holdMs = 45) {
@@ -911,7 +1102,7 @@ function buildArcadePromptMessage() {
 function scheduleArcadePromptLoop() {
   clearArcadePromptLoop()
   if (!ARCADE_RETRO_OSD_PROMPT_PERSIST) return
-  const HEARTBEAT_MS = 2200
+  const HEARTBEAT_MS = 4000
 
   const tick = () => {
     if (!arcadeSession?.active) {
@@ -1028,16 +1219,16 @@ async function fetchDeviceBalanceSnapshot() {
     `${SUPABASE_URL}/rest/v1/devices?` +
     `select=balance&device_id=eq.${encodeURIComponent(DEVICE_ID)}&limit=1`
 
-  const response = await fetch(url, {
+  const response = await requestJsonWithCurl(url, {
     method: 'GET',
     headers: getSupabaseHeaders(),
-    signal: AbortSignal.timeout(2500),
+    timeoutMs: 2500,
   })
   if (!response.ok) {
     throw new Error(`balance fetch failed (${response.status})`)
   }
 
-  const rows = await response.json()
+  const rows = response.json()
   const row = Array.isArray(rows) ? rows[0] : null
   if (!row) return null
   if (row.balance === null || row.balance === undefined) return null
@@ -1069,7 +1260,7 @@ async function syncArcadeSessionBalance(options = {}) {
     if (previous !== latestBalance) {
       console.log('[ARCADE LIFE BALANCE] applied', { previous, next: latestBalance })
       broadcastArcadeLifeState('balance_sync', { balance: latestBalance })
-      showArcadeOsdMessage(composeArcadeOsdOverlay(''), { bypassCooldown: true })
+      refreshArcadeOsdMessage()
     }
   } catch {
     // Keep loop alive; transient Supabase/network failures are expected.
@@ -1170,18 +1361,18 @@ async function fetchGameProfileForArcadeLife(gameId) {
     `select=id,name,price,type,enabled&id=eq.${encodeURIComponent(safeId)}&type=eq.arcade&limit=1`
 
   try {
-    const response = await fetch(url, {
+    const response = await requestJsonWithCurl(url, {
       method: 'GET',
       headers: getSupabaseHeaders(),
-      signal: AbortSignal.timeout(2500),
+      timeoutMs: 2500,
     })
     if (!response.ok) {
-      const text = await response.text().catch(() => '')
+      const text = response.text || ''
       console.error('[ARCADE LIFE] game profile fetch failed', response.status, text)
       return null
     }
 
-    const rows = await response.json()
+    const rows = response.json()
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row || row.enabled === false) return null
 
@@ -1218,11 +1409,11 @@ async function consumeArcadeLifeCharge({ player, reason = 'start' }) {
   }
 
   try {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/consume_arcade_life`, {
+    const response = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/consume_arcade_life`, {
       method: 'POST',
       headers: getSupabaseHeaders(),
-      signal: AbortSignal.timeout(3500),
-      body: JSON.stringify({
+      timeoutMs: 3500,
+      body: {
         p_device_id: DEVICE_ID,
         p_game_id: gameId,
         p_player: player,
@@ -1233,11 +1424,11 @@ async function consumeArcadeLifeCharge({ player, reason = 'start' }) {
           source: 'arcade-input-service',
           mode: ARCADE_LIFE_DEDUCT_MODE,
         },
-      }),
+      },
     })
 
     if (!response.ok) {
-      const text = await response.text().catch(() => '')
+      const text = response.text || ''
       console.error('[ARCADE LIFE] rpc failed', response.status, text)
       if (ARCADE_LIFE_FAIL_OPEN) {
         return {
@@ -1255,7 +1446,7 @@ async function consumeArcadeLifeCharge({ player, reason = 'start' }) {
       }
     }
 
-    const body = await response.json()
+    const body = response.json()
     const row = Array.isArray(body) ? body[0] : body
     const rowReason = String(row?.reason || '')
       .toLowerCase()
@@ -1317,6 +1508,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
 
   sessionRef.lastChargeAt[player] = now
   sessionRef.purchaseInFlight[player] = true
+  setArcadeOverlayNotice(`P${player.slice(1)} PROCESSING...`, 1600, 'center')
 
   consumeArcadeLifeCharge({ player, reason })
     .then(result => {
@@ -1789,6 +1981,7 @@ async function startVirtualDevices() {
 
 function mapIndexToKey(index) {
   switch (index) {
+    // Keep the virtual pad in standard RetroPad order.
     case 0:
       return BTN_SOUTH
     case 1:
@@ -1843,6 +2036,12 @@ function canAcceptRetroarchStop() {
   return Date.now() - retroarchStartedAt >= RETROARCH_EXIT_GUARD_MS
 }
 
+function canAcceptRetroarchStartInput() {
+  if (!retroarchActive) return false
+  if (!retroarchStartedAt) return true
+  return Date.now() - retroarchStartedAt >= RETROARCH_START_INPUT_GUARD_MS
+}
+
 function clearRetroarchExitConfirm() {
   retroarchExitConfirmUntil = 0
   if (arcadeOverlayNotice?.slot === 'center' && arcadeOverlayNotice?.text === 'EXIT GAME?') {
@@ -1875,8 +2074,9 @@ function handleRetroarchMenuExitIntent() {
 
   retroarchExitConfirmUntil = now + RETROARCH_EXIT_CONFIRM_WINDOW_MS
   setArcadeOverlayNotice('EXIT GAME?', RETROARCH_EXIT_CONFIRM_WINDOW_MS, 'center')
-  showArcadeOsdMessage(composeArcadeOsdOverlay('Press [MENU] Again To Exit'), {
+  showArcadeOsdMessage(composeArcadeOsdOverlay('EXIT GAME?'), {
     bypassCooldown: true,
+    urgent: true,
   })
   console.log('[RETROARCH] MENU exit armed', {
     windowMs: RETROARCH_EXIT_CONFIRM_WINDOW_MS,
@@ -1989,6 +2189,11 @@ function resolveKeyName(code) {
 function handleRawAxis(source, code, value) {
   const DEAD_LOW = 40
   const DEAD_HIGH = 215
+  const effectiveCode = source === 'P2' && retroarchActive ? (code === 0 ? 1 : code === 1 ? 0 : code) : code
+  const effectiveValue =
+    source === 'P2' && retroarchActive && effectiveCode === 0 && Number.isFinite(value)
+      ? 255 - value
+      : value
 
   if (!retroarchActive) {
     if (code === 0) {
@@ -2069,11 +2274,11 @@ function handleRawAxis(source, code, value) {
   }
 
   // X axis
-  if (code === 0) {
-    if (value < DEAD_LOW) {
+  if (effectiveCode === 0) {
+    if (effectiveValue < DEAD_LOW) {
       press('left', BTN_DPAD_LEFT)
       release('right', BTN_DPAD_RIGHT)
-    } else if (value > DEAD_HIGH) {
+    } else if (effectiveValue > DEAD_HIGH) {
       press('right', BTN_DPAD_RIGHT)
       release('left', BTN_DPAD_LEFT)
     } else {
@@ -2083,11 +2288,11 @@ function handleRawAxis(source, code, value) {
   }
 
   // Y axis
-  if (code === 1) {
-    if (value < DEAD_LOW) {
+  if (effectiveCode === 1) {
+    if (effectiveValue < DEAD_LOW) {
       press('up', BTN_DPAD_UP)
       release('down', BTN_DPAD_DOWN)
-    } else if (value > DEAD_HIGH) {
+    } else if (effectiveValue > DEAD_HIGH) {
       press('down', BTN_DPAD_DOWN)
       release('up', BTN_DPAD_UP)
     } else {
@@ -2260,6 +2465,17 @@ function routePlayerInput(source, index, value) {
           clearRetroarchExitConfirm()
         }
 
+        if (!canAcceptRetroarchStartInput()) {
+          if (value === 1) {
+            console.log('[RETROARCH] START ignored by launch guard', {
+              elapsedMs: retroarchStartedAt ? Date.now() - retroarchStartedAt : null,
+              guardMs: RETROARCH_START_INPUT_GUARD_MS,
+              player,
+            })
+          }
+          return
+        }
+
         if (needsCredit) {
           if (value === 1) {
             const now = Date.now()
@@ -2277,6 +2493,7 @@ function routePlayerInput(source, index, value) {
               )
               showArcadeOsdMessage(composeArcadeOsdOverlay('START GAME?'), {
                 bypassCooldown: true,
+                urgent: true,
               })
               broadcastArcadeLifeState('start_confirm_required', {
                 player,
@@ -2354,7 +2571,7 @@ function switchToVTWithRetry(vt, reason, attempts = 5, delayMs = 150) {
   attempt()
 }
 
-function scheduleForceSwitchToUI(reason, delayMs = 900) {
+function scheduleForceSwitchToUI(reason, delayMs = 300) {
   if (SINGLE_X_MODE) return
   if (!RETROARCH_USE_TTY_MODE || !IS_PI) return
 
@@ -2369,7 +2586,7 @@ function scheduleForceSwitchToUI(reason, delayMs = 900) {
   pendingUiFallbackTimer = setTimeout(() => {
     pendingUiFallbackTimer = null
     switchToVTWithRetry(targetUiVT, `${reason}-timer`)
-    setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-timer-post`), 300)
+    setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-timer-post`), 120)
   }, waitMs)
 
   console.log(`[VT] scheduled fallback to ${targetUiVT} (${reason})`)
@@ -2481,12 +2698,17 @@ function refreshArcadeOsdMessage() {
   if (!arcadeSession?.active) return
   const promptMessage = buildArcadePromptMessage()
   if (!promptMessage) return
-  showArcadeOsdMessage(promptMessage, { bypassCooldown: true })
+  const changed = promptMessage !== lastArcadePromptLoopMessage
+  showArcadeOsdMessage(promptMessage, { bypassCooldown: changed })
   lastArcadePromptLoopMessage = promptMessage
   lastArcadePromptLoopSentAt = Date.now()
 }
 
 function maybeRestartUiAfterExit(reason) {
+  if (RETROARCH_TTY_X_SESSION) {
+    restartArcadeUiAfterRetroarch(reason)
+    return
+  }
   if (!IS_PI || !RETROARCH_USE_TTY_MODE || !RESTART_UI_ON_EXIT || shuttingDown) return
 
   const now = Date.now()
@@ -2551,20 +2773,21 @@ function finalizeRetroarchExit(reason) {
     restoreChromiumUiAfterRetroarch()
   } else {
     switchToVTWithRetry(targetUiVT, reason)
-    setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-post`), 450)
+    setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-post`), 120)
     scheduleForceSwitchToUI(`${reason}-detached`)
   }
 
   if (wasActive) {
     clearArcadeLifeSession(reason)
     dispatch({ type: 'GAME_EXITED' })
-    setTimeout(() => maybeRestartUiAfterExit(reason), 250)
+    setTimeout(() => maybeRestartUiAfterExit(reason), 50)
   }
 }
 
 function requestRetroarchStop(reason) {
   clearRetroarchExitConfirm()
   if (!retroarchActive) return
+  dispatch({ type: 'GAME_EXITING', reason })
   const targetUiVT = getTargetUiVT()
 
   if (!retroarchProcess) {
@@ -2637,14 +2860,13 @@ async function shutdown() {
       await new Promise(resolve => serverInstance.close(resolve))
     }
 
-    if (wss) {
-      for (const client of wss.clients) {
+    if (sseClients.size > 0) {
+      for (const client of [...sseClients]) {
         try {
-          client.terminate() // force close immediately
+          client.end()
         } catch {}
+        sseClients.delete(client)
       }
-
-      await new Promise(resolve => wss.close(resolve))
     }
   } catch (err) {
     console.error('[SHUTDOWN ERROR]', err)
@@ -3042,8 +3264,36 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(getNetworkInfo()))
     return
   }
+  if (req.method === 'GET' && req.url === '/events') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    res.write('\n')
+    sseClients.add(res)
+    console.log('[SSE] client connected')
+
+    checkInternetOnce()
+      .then(online => {
+        sendSse(res, { type: online ? 'INTERNET_OK' : 'INTERNET_LOST' })
+      })
+      .catch(() => {
+        sendSse(res, { type: 'INTERNET_LOST' })
+      })
+
+    req.on('close', () => {
+      sseClients.delete(res)
+      console.log('[SSE] client disconnected')
+    })
+    return
+  }
   if (req.method === 'GET' && req.url === '/arcade-shell-update/status') {
     return sendJson(res, 200, { success: true, ...getArcadeShellUpdateStatus() })
+  }
+  if (req.method === 'GET' && req.url === '/arcade-life/overlay-state') {
+    return sendJson(res, 200, { success: true, ...getArcadeRetroOverlayState() })
   }
   if (req.method === 'GET' && req.url === '/wifi-scan') {
     if (!IS_PI) {
@@ -3530,16 +3780,6 @@ const server = http.createServer((req, res) => {
           initialBalance: payloadBalance,
         }
 
-        if (payloadGameId) {
-          const remoteProfile = await fetchGameProfileForArcadeLife(payloadGameId)
-          if (remoteProfile) {
-            gameProfile = {
-              ...remoteProfile,
-              initialBalance: payloadBalance,
-            }
-          }
-        }
-
         if (retroarchStopping) {
           console.warn('[LAUNCH] Ignored — RetroArch stopping')
           res.writeHead(409)
@@ -3629,6 +3869,11 @@ const server = http.createServer((req, res) => {
         startArcadeLifeSession(gameProfile)
         retroarchLogFd = fs.openSync(RETROARCH_LOG_PATH, 'a')
         clearScheduledForceSwitchToUI()
+        dispatch({
+          type: 'GAME_LAUNCHING',
+          gameId: gameProfile.gameId,
+          gameName: gameProfile.gameName,
+        })
 
         if (SINGLE_X_MODE) {
           hideChromiumUiForRetroarch()
@@ -3639,40 +3884,79 @@ const server = http.createServer((req, res) => {
             lastUiVT = activeVT
             console.log(`[VT] captured UI VT ${lastUiVT} before launch`)
           }
-          switchToVT(GAME_VT, 'launch')
+          if (RETROARCH_TTY_X_SESSION) {
+            stopArcadeUiForRetroarch()
+            if (USE_SPLASH_TRANSITIONS) {
+              startSplashForRetroarch()
+              switchToVT(SPLASH_VT, 'launch-splash')
+            }
+          } else {
+            switchToVT(GAME_VT, 'launch')
+          }
         }
 
         const command = ['-u', RETROARCH_RUN_USER, 'env']
 
         if (SINGLE_X_MODE) {
           command.push('DISPLAY=:0', `XAUTHORITY=${RETROARCH_RUN_HOME}/.Xauthority`)
-        } else {
+        } else if (!RETROARCH_TTY_X_SESSION) {
           command.push('-u', 'DISPLAY', '-u', 'XAUTHORITY', '-u', 'WAYLAND_DISPLAY')
         }
 
         command.push(
+          `HOME=${RETROARCH_RUN_HOME}`,
+          `USER=${RETROARCH_RUN_USER}`,
+          `LOGNAME=${RETROARCH_RUN_USER}`,
           `XDG_RUNTIME_DIR=${RETROARCH_RUNTIME_DIR}`,
           `DBUS_SESSION_BUS_ADDRESS=${RETROARCH_DBUS_ADDRESS}`,
           `PULSE_SERVER=${RETROARCH_PULSE_SERVER}`,
         )
 
-        if (RETROARCH_USE_DBUS_RUN_SESSION) command.push('dbus-run-session', '--')
-        command.push('retroarch', '--fullscreen', '--verbose')
+        let launchCommand = 'sudo'
+        let launchArgs
 
-        if (RETROARCH_CONFIG_PATH) {
-          command.push('--config', RETROARCH_CONFIG_PATH)
+        if (RETROARCH_TTY_X_SESSION) {
+          const launcherScript =
+            process.env.RETROARCH_TTY_X_LAUNCHER_SCRIPT ||
+            path.join(ARCADE_RUNTIME_DIR, 'os', 'bin', 'arcade-retro-launch.sh')
+          const sessionScript =
+            process.env.RETROARCH_TTY_X_SESSION_SCRIPT ||
+            path.join(ARCADE_RUNTIME_DIR, 'os', 'bin', 'arcade-retro-session.sh')
+
+          launchCommand = 'env'
+          launchArgs = [
+            `ARCADE_RETRO_DISPLAY=:1`,
+            `ARCADE_RETRO_VT=vt${GAME_VT}`,
+            `ARCADE_RETRO_SESSION_SCRIPT=${sessionScript}`,
+            `ARCADE_RETRO_RUN_USER=${RETROARCH_RUN_USER}`,
+            `ARCADE_RETRO_RUN_HOME=${RETROARCH_RUN_HOME}`,
+            `ARCADE_RETRO_XDG_RUNTIME_DIR=${RETROARCH_RUNTIME_DIR}`,
+            `ARCADE_RETRO_DBUS_ADDRESS=${RETROARCH_DBUS_ADDRESS}`,
+            `ARCADE_RETRO_PULSE_SERVER=${RETROARCH_PULSE_SERVER}`,
+            `ARCADE_RETRO_SWITCH_TO_VT=${GAME_VT}`,
+            `ARCADE_RETRO_PREWARMED_X=${RETROARCH_TTY_X_PREWARM ? '1' : '0'}`,
+            `ARCADE_RETRO_CORE_PATH=${core.path}`,
+            `ARCADE_RETRO_ROM_PATH=${romPath}`,
+            `ARCADE_RETRO_OVERLAY_URL=http://127.0.0.1:${PORT}/retro-overlay.html`,
+            ...(RETROARCH_CONFIG_PATH ? [`ARCADE_RETRO_CONFIG_PATH=${RETROARCH_CONFIG_PATH}`] : []),
+            launcherScript,
+          ]
+          console.log('[LAUNCH] tty-x-session argv', launchArgs)
+        } else {
+          if (RETROARCH_USE_DBUS_RUN_SESSION) command.push('dbus-run-session', '--')
+          command.push('retroarch', '--fullscreen', '--verbose')
+
+          if (RETROARCH_CONFIG_PATH) {
+            command.push('--config', RETROARCH_CONFIG_PATH)
+          }
+
+          command.push('-L', core.path, romPath)
+          launchArgs = command
+          console.log('[LAUNCH] sudo argv', launchArgs)
         }
 
-        // if (SINGLE_X_MODE) {
-        //   command.push('--appendconfig', '/home/arcade1/arcade/os/retroarch-single-x.cfg')
-        // }
-
-        command.push('-L', core.path, romPath)
-
-        console.log('[LAUNCH] sudo argv', command)
-
-        retroarchProcess = spawn('sudo', command, {
-          stdio: ['ignore', retroarchLogFd, retroarchLogFd],
+        retroarchProcess = spawn(launchCommand, launchArgs, {
+          stdio: ['pipe', retroarchLogFd, retroarchLogFd],
           detached: true,
         })
 

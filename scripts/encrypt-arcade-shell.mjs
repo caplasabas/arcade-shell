@@ -2,7 +2,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createCipheriv, createHash, randomBytes } from 'node:crypto'
-import { execSync } from 'node:child_process'
 
 function fail(message) {
   console.error(`[encrypt-arcade-shell] ${message}`)
@@ -10,20 +9,19 @@ function fail(message) {
 }
 
 const gameId = process.env.ARCADE_SHELL_ID || 'arcade-shell'
+const packageJsonPath = path.resolve('package.json')
+let packageVersion = ''
+try {
+  packageVersion = String(JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))?.version || '').trim()
+} catch {
+  packageVersion = ''
+}
 const version =
   process.env.ARCADESHELL_VERSION ||
   process.argv[2] ||
-  (() => {
-    try {
-      return execSync('git describe --tags --always --dirty', {
-        encoding: 'utf8',
-      }).trim()
-    } catch (error) {
-      return null
-    }
-  })()
+  packageVersion
 
-if (!version) fail('Missing ARCADESHELL_VERSION or git describe failed')
+if (!version) fail('Missing ARCADESHELL_VERSION or package.json version')
 
 const keyHex = process.env.GAME_PACKAGE_KEY_HEX
 if (!keyHex || keyHex.length !== 64) {
