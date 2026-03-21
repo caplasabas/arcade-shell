@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { GameGrid } from './components/GameGrid'
 import { NoInternetModal } from './components/NoInternetModal'
 import { WifiSetupModal } from './components/WifiSetupModal'
+import { SettingsModal } from './components/SettingsModal'
 
 import { ArcadeShellVersionBadge } from './components/ArcadeShellVersionBadge'
 
@@ -32,6 +33,7 @@ export type Game = {
   theme?: string
   emulator_core?: string
   rom_path?: string
+  join_mode?: 'simultaneous' | 'alternating' | 'single_only'
   package_url?: string
   version?: number
 }
@@ -45,6 +47,7 @@ type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
 const ARCADE_SHELL_VERSION =
   String(import.meta.env.VITE_ARCADE_SHELL_VERSION || '').trim() || '0.6.0'
+type SettingsItem = 'volume' | 'network' | 'reboot' | 'shutdown'
 
 type ShellUpdateStatus = {
   status?: string
@@ -78,6 +81,7 @@ type ArcadeLifeOverlayState = {
 type TransitionOverlayState = {
   visible: boolean
   label: string
+  detail?: string | null
 }
 
 function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
@@ -108,6 +112,7 @@ export default function App() {
   const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
   const casinoFrameRef = useRef<HTMLIFrameElement | null>(null)
   const [casinoPreparing, setCasinoPreparing] = useState(false)
+  const [casinoPreparingDetail, setCasinoPreparingDetail] = useState<string | null>(null)
   const [casinoLaunchError, setCasinoLaunchError] = useState<string | null>(null)
   const preparedCasinoVersionRef = useRef<Record<string, number>>({})
 
@@ -128,6 +133,12 @@ export default function App() {
   const [wifiIp, setWifiIp] = useState<string | null>(null)
 
   const [showWifiModal, setShowWifiModal] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const [settingsFocused, setSettingsFocused] = useState(false)
+  const [selectedSettingsItem, setSelectedSettingsItem] = useState<SettingsItem>('volume')
+  const [volumeLabel, setVolumeLabel] = useState('100%')
+  const [volumePercent, setVolumePercent] = useState<number | null>(null)
+  const [uiNotice, setUiNotice] = useState<string | null>(null)
 
   const [initialized, setInitialized] = useState(false)
   const [balance, setBalance] = useState(0)
@@ -135,6 +146,7 @@ export default function App() {
   const [games, setGames] = useState<Game[]>([])
 
   const selectedGame = games[focus] ?? null
+  const hasLocalLink = wifiConnected || Boolean(ethernetIp)
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -149,6 +161,12 @@ export default function App() {
     const timer = window.setTimeout(() => setCasinoLaunchError(null), 4000)
     return () => window.clearTimeout(timer)
   }, [casinoLaunchError])
+
+  useEffect(() => {
+    if (!uiNotice) return
+    const timer = window.setTimeout(() => setUiNotice(null), 2200)
+    return () => window.clearTimeout(timer)
+  }, [uiNotice])
 
   useEffect(() => {
     let stopped = false
@@ -180,16 +198,32 @@ export default function App() {
     balanceRef.current = balance
   }, [balance])
 
+  const wifiConnectedRef = useRef(wifiConnected)
+  useEffect(() => {
+    wifiConnectedRef.current = wifiConnected
+  }, [wifiConnected])
+
+  const ethernetIpRef = useRef(ethernetIp)
+  useEffect(() => {
+    ethernetIpRef.current = ethernetIp
+  }, [ethernetIp])
+
   const networkStageRef = useRef(networkStage)
 
   useEffect(() => {
     networkStageRef.current = networkStage
   }, [networkStage])
 
+  const hasLocalLinkRef = useRef(false)
+  useEffect(() => {
+    hasLocalLinkRef.current = Boolean(wifiConnected || ethernetIp)
+  }, [wifiConnected, ethernetIp])
+
   const [loading, setLoading] = useState(false)
   const [transitionOverlay, setTransitionOverlay] = useState<TransitionOverlayState>({
     visible: false,
     label: 'Loading Game...',
+    detail: null,
   })
   const [bootFlowComplete, setBootFlowComplete] = useState(false)
   const [shellUpdateOverlayVisible, setShellUpdateOverlayVisible] = useState(false)
@@ -235,6 +269,11 @@ export default function App() {
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [showExitConfirmModal, setShowExitConfirmModal] = useState(false)
   const [exitConfirmContext, setExitConfirmContext] = useState<ExitConfirmContext | null>(null)
+  const volumeAdjustRef = useRef<{ direction: 'up' | 'down' | null; at: number; streak: number }>({
+    direction: null,
+    at: 0,
+    streak: 0,
+  })
 
   const exitConfirmDeadlineRef = useRef(0)
   const exitConfirmTimerRef = useRef<number | null>(null)
@@ -307,6 +346,130 @@ export default function App() {
       throw new Error(`Local ${command} failed (${response.status})${text ? `: ${text}` : ''}`)
     }
   }, [])
+
+  const flashUiNotice = useCallback((message: string) => {
+    setUiNotice(message)
+  }, [])
+
+  const refreshVolumeState = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/system/volume`)
+      const payload = (await response.json().catch(() => null)) as
+        | { success?: boolean; volume?: string; percent?: number | null; error?: string }
+        | null
+
+      if (!response.ok) {
+        throw new Error(`volume read failed (${response.status})`)
+      }
+
+      if (payload?.error === 'NO_AUDIO_DEVICE' || payload?.volume === 'NO AUDIO DEVICE') {
+        setVolumeLabel('NO AUDIO DEVICE')
+        setVolumePercent(null)
+        return
+      }
+
+      const nextPercent = typeof payload?.percent === 'number' ? payload.percent : 0
+      setVolumeLabel(`${nextPercent}%`)
+      setVolumePercent(nextPercent)
+    } catch (error) {
+      console.error('[SETTINGS] volume refresh failed', error)
+      setVolumeLabel('VOLUME ERROR')
+      setVolumePercent(null)
+    }
+  }, [])
+
+  const adjustVolume = useCallback(
+    async (direction: 'up' | 'down') => {
+      try {
+        const now = Date.now()
+        const prev = volumeAdjustRef.current
+        const streak =
+          prev.direction === direction && now - prev.at < 450 ? Math.min(prev.streak + 1, 5) : 1
+        volumeAdjustRef.current = { direction, at: now, streak }
+        const step = streak >= 5 ? 8 : streak >= 4 ? 6 : streak >= 3 ? 4 : streak >= 2 ? 2 : 1
+
+        const response = await fetch(`${API_BASE}/system/volume`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ direction, step }),
+        })
+        const payload = (await response.json().catch(() => null)) as
+          | { success?: boolean; volume?: string; percent?: number | null; error?: string }
+          | null
+        if (!response.ok) {
+          if (payload?.error === 'NO_AUDIO_DEVICE' || payload?.volume === 'NO AUDIO DEVICE') {
+            setVolumeLabel('NO AUDIO DEVICE')
+            setVolumePercent(null)
+            flashUiNotice('NO AUDIO DEVICE')
+            return
+          }
+          throw new Error(`volume failed (${response.status})`)
+        }
+        if (payload?.volume) {
+          if (payload.volume === 'NO AUDIO DEVICE') {
+            setVolumeLabel('NO AUDIO DEVICE')
+            setVolumePercent(null)
+            flashUiNotice('NO AUDIO DEVICE')
+            return
+          }
+          const nextPercent = typeof payload?.percent === 'number' ? payload.percent : null
+          setVolumeLabel(nextPercent === null ? '0%' : `${nextPercent}%`)
+          setVolumePercent(nextPercent)
+          flashUiNotice(nextPercent === null ? 'VOLUME' : `${nextPercent}%`)
+          return
+        }
+        flashUiNotice(direction === 'up' ? 'VOLUME UP' : 'VOLUME DOWN')
+      } catch (error) {
+        console.error('[SETTINGS] volume adjust failed', error)
+        flashUiNotice('VOLUME ERROR')
+      }
+    },
+    [flashUiNotice],
+  )
+
+  useEffect(() => {
+    if (!showSettingsModal) return
+    void refreshVolumeState()
+  }, [refreshVolumeState, showSettingsModal])
+
+  const closeSettingsModal = useCallback(() => {
+    setShowSettingsModal(false)
+    setShowWifiModal(false)
+  }, [])
+
+  const openSettingsModal = useCallback(() => {
+    setSelectedSettingsItem('volume')
+    setShowSettingsModal(true)
+  }, [])
+
+  const openNetworkSettings = useCallback(() => {
+    setShowSettingsModal(false)
+    setShowWifiModal(true)
+  }, [])
+
+  const handleSettingsAction = useCallback(async () => {
+    switch (selectedSettingsItem) {
+      case 'volume':
+        return
+      case 'network':
+        openNetworkSettings()
+        return
+      case 'reboot':
+        flashUiNotice('REBOOTING')
+        await executeLocalPowerCommand('restart').catch(error => {
+          console.error('[SETTINGS] reboot failed', error)
+          flashUiNotice('REBOOT FAILED')
+        })
+        return
+      case 'shutdown':
+        flashUiNotice('SHUTTING DOWN')
+        await executeLocalPowerCommand('shutdown').catch(error => {
+          console.error('[SETTINGS] shutdown failed', error)
+          flashUiNotice('SHUTDOWN FAILED')
+        })
+        return
+    }
+  }, [executeLocalPowerCommand, flashUiNotice, openNetworkSettings, selectedSettingsItem])
 
   const processAdminCommand = useCallback(
     async (command: DeviceAdminCommandRow) => {
@@ -409,8 +572,9 @@ export default function App() {
       } catch (err) {
         console.error('Boot failed', err)
 
-        // If backend unreachable, push back to offline state
-        setNetworkStage('no-internet')
+        // Keep the shell usable when the Pi still has a local network link but
+        // remote services are slow or temporarily unreachable.
+        setNetworkStage(wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet')
       } finally {
         if (!cancelled) {
           setLoading(false)
@@ -508,7 +672,7 @@ export default function App() {
       setBootFlowComplete(true)
 
       if (networkStageRef.current === 'boot') {
-        setNetworkStage('no-internet')
+        setNetworkStage(wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet')
       }
     }, BOOT_UPDATER_NETWORK_GRACE_MS)
 
@@ -903,6 +1067,8 @@ export default function App() {
     showWithdrawModal: false,
     showExitConfirmModal: false,
     runningCasino: false,
+    showSettingsModal: false,
+    showWifiModal: false,
   })
 
   useEffect(() => {
@@ -914,6 +1080,8 @@ export default function App() {
       showWithdrawModal,
       showExitConfirmModal,
       runningCasino,
+      showSettingsModal,
+      showWifiModal,
     }
   }, [
     initialized,
@@ -923,6 +1091,8 @@ export default function App() {
     showWithdrawModal,
     showExitConfirmModal,
     runningCasino,
+    showSettingsModal,
+    showWifiModal,
   ])
 
   const addWithdrawAmountRef = useRef(addWithdrawAmount)
@@ -932,6 +1102,12 @@ export default function App() {
   const requestExitConfirmRef = useRef(requestExitConfirm)
   const confirmExitRef = useRef(confirmExit)
   const closeExitConfirmRef = useRef(closeExitConfirm)
+  const adjustVolumeRef = useRef(adjustVolume)
+  const handleSettingsActionRef = useRef(handleSettingsAction)
+  const closeSettingsModalRef = useRef(closeSettingsModal)
+  const openSettingsModalRef = useRef(openSettingsModal)
+  const settingsFocusedRef = useRef(settingsFocused)
+  const selectedSettingsItemRef = useRef(selectedSettingsItem)
 
   useEffect(() => {
     setShowWithdrawModalRef.current = setShowWithdrawModal
@@ -941,7 +1117,19 @@ export default function App() {
     requestExitConfirmRef.current = requestExitConfirm
     confirmExitRef.current = confirmExit
     closeExitConfirmRef.current = closeExitConfirm
+    adjustVolumeRef.current = adjustVolume
+    handleSettingsActionRef.current = handleSettingsAction
+    closeSettingsModalRef.current = closeSettingsModal
+    openSettingsModalRef.current = openSettingsModal
   })
+
+  useEffect(() => {
+    settingsFocusedRef.current = settingsFocused
+  }, [settingsFocused])
+
+  useEffect(() => {
+    selectedSettingsItemRef.current = selectedSettingsItem
+  }, [selectedSettingsItem])
 
   const focusRef = useRef(focus)
 
@@ -1008,13 +1196,10 @@ export default function App() {
       }
 
       if (payload.type === 'INTERNET_LOST') {
-        if (internetLossTimerRef.current) return
-
-        internetLossTimerRef.current = setTimeout(() => {
-          setNetworkStage('no-internet')
+        if (internetLossTimerRef.current) {
+          clearTimeout(internetLossTimerRef.current)
           internetLossTimerRef.current = null
-        }, INTERNET_LOSS_UI_DEBOUNCE_MS)
-
+        }
         return
       }
 
@@ -1035,28 +1220,14 @@ export default function App() {
         return
       }
 
-      if (
-        payload.type === 'PLAYER' &&
-        payload.player === 'P1' &&
-        networkStageRef.current !== 'ok'
-      ) {
-        const button = payload.button
-
-        if (networkStageRef.current === 'no-internet' && button === 0) {
-          setNetworkStage('wifi-form')
-          return
-        }
-
+      if (payload.type === 'PLAYER' && payload.player === 'P1' && s.showWifiModal) {
         window.dispatchEvent(
           new CustomEvent('ARCADE_MODAL_INPUT', {
-            detail: { button },
+            detail: { button: payload.button },
           }),
         )
-
         return
       }
-
-      if (networkStageRef.current !== 'ok') return
 
       if (!payload || !s.initialized) return
 
@@ -1081,6 +1252,7 @@ export default function App() {
         setTransitionOverlay({
           visible: true,
           label: 'Loading Game...',
+          detail: payload.gameName ? `PREPARING ${String(payload.gameName).toUpperCase()}` : null,
         })
         return
       }
@@ -1089,6 +1261,7 @@ export default function App() {
         setTransitionOverlay({
           visible: true,
           label: 'Returning to Menu...',
+          detail: 'RESTORING ARCADE SHELL',
         })
         return
       }
@@ -1117,6 +1290,7 @@ export default function App() {
           setTransitionOverlay({
             visible: false,
             label: 'Loading Game...',
+            detail: null,
           })
         }, 220)
 
@@ -1172,6 +1346,49 @@ export default function App() {
           return
         }
 
+        if (s.showSettingsModal) {
+          if (button === 'UP') {
+            setSelectedSettingsItem(prev =>
+              prev === 'volume'
+                ? 'shutdown'
+                : prev === 'network'
+                  ? 'volume'
+                  : prev === 'reboot'
+                    ? 'network'
+                    : 'reboot',
+            )
+            return
+          }
+          if (button === 'DOWN') {
+            setSelectedSettingsItem(prev =>
+              prev === 'volume'
+                ? 'network'
+                : prev === 'network'
+                  ? 'reboot'
+                  : prev === 'reboot'
+                    ? 'shutdown'
+                    : 'volume',
+            )
+            return
+          }
+          if (
+            (button === 'LEFT' || button === 'RIGHT') &&
+            selectedSettingsItemRef.current === 'volume'
+          ) {
+            void adjustVolumeRef.current(button === 'LEFT' ? 'down' : 'up')
+            return
+          }
+          if (button === 6 || button === 5) {
+            closeSettingsModalRef.current()
+            return
+          }
+          if (button === 7 || button === 0 || button === 1) {
+            void handleSettingsActionRef.current()
+            return
+          }
+          return
+        }
+
         if (s.showExitConfirmModal) {
           if (button === 6 || button === 7 || button === 0) {
             confirmExitRef.current()
@@ -1214,6 +1431,21 @@ export default function App() {
           return
         }
 
+        if (payload.type === 'ACTION' && payload.action === 'MENU') {
+          if (s.showWifiModal) {
+            setShowWifiModal(false)
+            return
+          }
+          if (s.showSettingsModal) {
+            closeSettingsModalRef.current()
+            return
+          }
+        }
+
+        if (s.showSettingsModal && payload.type === 'ACTION' && payload.action === 'MENU') {
+          return
+        }
+
         switch (payload.action) {
           case 'MENU': {
             if (s.showExitConfirmModal) {
@@ -1243,6 +1475,10 @@ export default function App() {
           }
 
           case 'WITHDRAW': {
+            if (!hasLocalLinkRef.current) {
+              flashUiNotice('OFFLINE')
+              break
+            }
             if (!s.showWithdrawModal) {
               if (getMaxSelectable(s.balance) < MIN) break
               setShowWithdrawModalRef.current(true)
@@ -1283,8 +1519,29 @@ export default function App() {
   }, [])
 
   function handleMenuInput(button: any) {
+    if (settingsFocusedRef.current) {
+      switch (button) {
+        case 'DOWN':
+          setSettingsFocused(false)
+          return
+        case 7:
+        case 0:
+        case 1:
+          openSettingsModalRef.current()
+          return
+        case 6:
+          requestExitConfirm('menu')
+          return
+      }
+      return
+    }
+
     switch (button) {
       case 'UP':
+        if (focusRef.current % GRID_ROWS === 0) {
+          setSettingsFocused(true)
+          return
+        }
         moveFocus(-1)
         break
       case 'DOWN':
@@ -1331,6 +1588,7 @@ export default function App() {
   const bgOffset = (Math.floor(focus / GRID_ROWS) % GRID_VISIBLE_COLS) * 6
 
   function moveFocus(delta: number) {
+    setSettingsFocused(false)
     setFocus(prev => {
       const currentGames = gamesRef.current
       const nextIndex = prev + delta
@@ -1361,22 +1619,41 @@ export default function App() {
 
       switch (e.key) {
         case 'ArrowRight':
+          if (settingsFocused) return
           moveFocus(GRID_ROWS)
           break
 
         case 'ArrowLeft':
+          if (settingsFocused) return
           moveFocus(-GRID_ROWS)
           break
 
         case 'ArrowDown':
+          if (settingsFocused) {
+            setSettingsFocused(false)
+            return
+          }
           moveFocus(1)
           break
 
         case 'ArrowUp':
+          if (settingsFocused) return
+          if (focusRef.current % GRID_ROWS === 0) {
+            setSettingsFocused(true)
+            return
+          }
           moveFocus(-1)
           break
 
         case 'Enter':
+          if (showSettingsModal) {
+            void handleSettingsAction()
+            return
+          }
+          if (settingsFocused) {
+            openSettingsModal()
+            return
+          }
           if (!selectedGame) return
           launch(selectedGame)
           break
@@ -1385,7 +1662,16 @@ export default function App() {
 
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [focus, requestExitConfirm, runningCasino, selectedGame])
+  }, [
+    focus,
+    handleSettingsAction,
+    openSettingsModal,
+    requestExitConfirm,
+    runningCasino,
+    selectedGame,
+    settingsFocused,
+    showSettingsModal,
+  ])
 
   async function launch(game: Game) {
     const frontendGameRunning = Boolean(runningGameRef.current) || runningCasino
@@ -1405,13 +1691,6 @@ export default function App() {
       return
     }
 
-    if (networkStageRef.current !== 'ok') {
-      console.warn('[LAUNCH] aborted: network stage is not ok', {
-        networkStage: networkStageRef.current,
-      })
-      return
-    }
-
     if (frontendGameRunning) {
       console.warn('[LAUNCH] aborted: frontend already has running game state', {
         runningGame: runningGameRef.current,
@@ -1425,6 +1704,11 @@ export default function App() {
     }
 
     if (game.type === 'casino') {
+      if (!hasLocalLinkRef.current) {
+        flashUiNotice('OFFLINE')
+        return
+      }
+
       if (!game.package_url) {
         console.error('[LAUNCH] Missing package_url for casino game', { id: game.id })
         setCasinoLaunchError('Game package unavailable.')
@@ -1434,6 +1718,9 @@ export default function App() {
       const requestedVersion = Number(game.version ?? 1)
       let entry: string
 
+      setCasinoPreparingDetail(
+        describeLoadingTarget(game.package_url, `PREPARING ${game.name.toUpperCase()}`),
+      )
       setCasinoPreparing(true)
       try {
         const prepareRes = await fetch(`${API_BASE}/game-package/prepare`, {
@@ -1484,6 +1771,7 @@ export default function App() {
         return
       } finally {
         setCasinoPreparing(false)
+        setCasinoPreparingDetail(null)
       }
 
       launchGame({
@@ -1510,7 +1798,16 @@ export default function App() {
         name: game.name,
         core: game.emulator_core,
         rom: game.rom_path,
+        join_mode: game.join_mode,
         balance: balanceRef.current,
+      })
+
+      setTransitionOverlay({
+        visible: true,
+        label: 'Loading Game...',
+        detail: game.rom_path
+          ? describeLoadingTarget(game.rom_path, `PREPARING ${game.name.toUpperCase()}`)
+          : `PREPARING ${game.name.toUpperCase()}`,
       })
 
       const response = await fetch(API_BASE, {
@@ -1523,6 +1820,7 @@ export default function App() {
           price: game.price,
           core: game.emulator_core,
           rom: game.rom_path,
+          joinMode: game.join_mode,
           balance: balanceRef.current,
         }),
       })
@@ -1533,6 +1831,11 @@ export default function App() {
           id: game.id,
           status: response.status,
           error: errorText,
+        })
+        setTransitionOverlay({
+          visible: false,
+          label: 'Loading Game...',
+          detail: null,
         })
         return
       }
@@ -1562,6 +1865,78 @@ export default function App() {
       hour: '2-digit',
       minute: '2-digit',
     })
+  }
+
+  function formatLoadingDetail(detail: string | null | undefined) {
+    const text = String(detail ?? '').trim()
+    return text || null
+  }
+
+  function describeLoadingTarget(input: string | null | undefined, fallback: string) {
+    const raw = String(input ?? '').trim()
+    if (!raw) return fallback
+
+    try {
+      const url = new URL(raw)
+      const fileName = url.pathname.split('/').filter(Boolean).pop()
+      return fileName ? `DOWNLOADING ${fileName}` : fallback
+    } catch {
+      const fileName = raw.split('/').filter(Boolean).pop()
+      return fileName ? `PREPARING ${fileName}` : fallback
+    }
+  }
+
+  function LoadingOverlay({
+    label,
+    detail,
+    zIndex = 99999,
+  }: {
+    label: string
+    detail?: string | null
+    zIndex?: number
+  }) {
+    const footerDetail = formatLoadingDetail(detail)
+
+    return (
+      <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex }}>
+        <img
+          src={bootImage}
+          alt="Loading"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.5)',
+          }}
+        />
+        <div
+          className="boot-loading-content"
+          style={{
+            position: 'relative',
+            zIndex: 1,
+          }}
+        >
+          <div className="boot-spinner" />
+          <div className="boot-text">{label}</div>
+        </div>
+        {footerDetail ? (
+          <div className="boot-loading-footer">
+            <div className="boot-loading-footer-spinner" />
+            <div className="boot-loading-footer-value">{footerDetail}</div>
+          </div>
+        ) : null}
+      </div>
+    )
   }
 
   function WifiIndicator({ signal, connected }: { signal: number | null; connected: boolean }) {
@@ -1607,137 +1982,75 @@ export default function App() {
 
   if (networkStage === 'boot' || (networkStage === 'ok' && !bootFlowComplete)) {
     return (
-      <div className="boot-loading">
-        <img
-          src={bootImage}
-          alt="Boot"
-          style={{
-            position: 'absolute',
-            inset: 0,
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          }}
-        />
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.45)',
-          }}
-        />
-        <div
-          className="boot-loading-content"
-          style={{
-            position: 'relative',
-            zIndex: 1,
-          }}
-        >
-          <div className="boot-spinner" />
-          {shellUpdateOverlayVisible ? (
-            <>
-              <div className="boot-text">{bootOverlayLabel}</div>
-              {bootOverlayDetail ? <div className="boot-subtext">{bootOverlayDetail}</div> : null}
-            </>
-          ) : null}
-        </div>
-      </div>
-    )
-  }
-
-  if (networkStage !== 'ok') {
-    return (
-      <>
-        {networkStage === 'no-internet' && (
-          <NoInternetModal
-            onConnect={() => setNetworkStage('wifi-form')}
-            wifiConnected={wifiConnected}
-            currentSsid={wifiSsid}
-          />
-        )}
-
-        {networkStage === 'wifi-form' && (
-          <WifiSetupModal
-            onConnected={() => setNetworkStage('ok')}
-            wifiConnected={wifiConnected}
-            currentSsid={wifiSsid}
-          />
-        )}
-      </>
+      <LoadingOverlay
+        label={shellUpdateOverlayVisible ? bootOverlayLabel : 'Starting Arcade Shell'}
+        detail={shellUpdateOverlayVisible ? bootOverlayDetail : 'INITIALIZING SYSTEM SERVICES'}
+      />
     )
   }
 
   return (
     <div>
-      {transitionOverlay.visible && (
-        <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99999 }}>
-          <img
-            src={bootImage}
-            alt="Transition"
-            style={{
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              pointerEvents: 'none',
-              userSelect: 'none',
-            }}
-          />
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              background: 'rgba(0, 0, 0, 0.55)',
-            }}
-          />
-          <div
-            className="boot-loading-content"
-            style={{
-              position: 'relative',
-              zIndex: 1,
-            }}
-          >
-            <div className="boot-spinner" />
-            <div className="boot-text">{transitionOverlay.label}</div>
-          </div>
+      {uiNotice && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 20,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 100002,
+            background: 'rgba(0,0,0,0.88)',
+            border: '1px solid #a07d37',
+            color: '#ffd84d',
+            padding: '10px 16px',
+            borderRadius: 6,
+            fontSize: 18,
+            fontFamily: 'Bebas Neue, sans-serif',
+            letterSpacing: '0.06em',
+          }}
+        >
+          {uiNotice}
         </div>
       )}
+      {transitionOverlay.visible && (
+        <LoadingOverlay
+          label={transitionOverlay.label}
+          detail={transitionOverlay.detail}
+          zIndex={99999}
+        />
+      )}
       {casinoPreparing && (
-        <div className="boot-loading" style={{ position: 'fixed', inset: 0, zIndex: 99998 }}>
-          <img
-            src={bootImage}
-            alt="Boot"
-            style={{
-              position: 'absolute',
-              inset: 0,
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              pointerEvents: 'none',
-              userSelect: 'none',
-            }}
-          />
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              background: 'rgba(0, 0, 0, 0.45)',
-            }}
-          />
-          <div
-            className="boot-loading-content"
-            style={{
-              position: 'relative',
-              zIndex: 1,
-            }}
-          >
-            <div className="boot-spinner" />
-            <div className="boot-text">Loading Game Package...</div>
-          </div>
-        </div>
+        <LoadingOverlay
+          label="Loading Game Package..."
+          detail={casinoPreparingDetail}
+          zIndex={99998}
+        />
+      )}
+      {networkStage === 'no-internet' && !showWifiModal && !hasLocalLink && (
+        <NoInternetModal
+          onConnect={() => setShowWifiModal(true)}
+          wifiConnected={wifiConnected}
+          currentSsid={wifiSsid}
+        />
+      )}
+      {showWifiModal && (
+        <WifiSetupModal
+          onConnected={() => {
+            setShowWifiModal(false)
+            setNetworkStage('ok')
+            flashUiNotice('NETWORK READY')
+          }}
+          wifiConnected={wifiConnected}
+          currentSsid={wifiSsid}
+        />
+      )}
+      {showSettingsModal && (
+        <SettingsModal
+          selected={selectedSettingsItem}
+          volumeLabel={volumeLabel}
+          volumePercent={volumePercent}
+          offline={!hasLocalLinkRef.current}
+        />
       )}
       {casinoLaunchError && (
         <div
@@ -1767,6 +2080,10 @@ export default function App() {
           onMinusAmount={minusWithdrawAmount}
           onCancel={() => setShowWithdrawModal(false)}
           onConfirm={() => {
+            if (!hasLocalLinkRef.current) {
+              flashUiNotice('OFFLINE')
+              return
+            }
             if (!isValidWithdrawAmount(withdrawAmount, balance)) return
             fetch(API_BASE, {
               method: 'POST',
@@ -1793,16 +2110,35 @@ export default function App() {
 
       {!runningCasino && (
         <div className="top-status-bar">
-          <div>{formatDateTime(now)}</div>
-
-          <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
+          <div className="top-status-left">
+            <div className="top-status-network">
+              <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
+              <span className="top-status-ssid">
+                {wifiSsid?.trim() || (wifiConnected ? 'CONNECTED' : ethernetIp ? 'ETHERNET' : 'OFFLINE')}
+              </span>
+            </div>
+            <div>{formatDateTime(now)}</div>
+          </div>
+          <button
+            type="button"
+            className={['settings-cog', settingsFocused ? 'focused' : ''].join(' ').trim()}
+            onClick={openSettingsModal}
+            aria-label="Settings"
+          >
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.36 7.36 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.13.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.16a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.41 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.13-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z"
+              />
+            </svg>
+          </button>
         </div>
       )}
 
       <GameGrid
         balance={balance}
         games={games}
-        focusedIndex={focus}
+        focusedIndex={settingsFocused ? -1 : focus}
         hasOverflow={games.length > GRID_ROWS * GRID_VISIBLE_COLS}
       />
       {/*{!runningCasino && runningGame?.type === 'arcade' && arcadeLifeOverlay.active && (*/}

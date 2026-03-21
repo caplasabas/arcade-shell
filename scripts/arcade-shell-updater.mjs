@@ -733,10 +733,9 @@ async function maybeInstallShellUpdate({
 async function maybeBuildRemoteHelper(installDir) {
   const helperSource = path.join(installDir, 'bin', 'uinput-helper.c')
   const helperTarget = path.join(installDir, 'bin', 'uinput-helper')
+  const overlaySource = path.join(installDir, 'bin', 'arcade-retro-overlay.c')
+  const overlayTarget = path.join(installDir, 'bin', 'arcade-retro-overlay')
 
-  if (!(await fileExists(helperSource))) return
-
-  console.log('[arcade-shell-updater] building uinput-helper')
   const compilerCandidates = ['cc', 'gcc', 'clang']
   const compiler = compilerCandidates.find(name => {
     const result = spawnSync('sh', ['-lc', `command -v ${name} >/dev/null 2>&1`], {
@@ -746,11 +745,36 @@ async function maybeBuildRemoteHelper(installDir) {
   })
 
   if (!compiler) {
-    throw new Error('no C compiler found for uinput-helper (need cc, gcc, or clang)')
+    throw new Error('no C compiler found for native helpers (need cc, gcc, or clang)')
   }
 
-  run(compiler, ['-O2', '-s', '-Wall', '-Wextra', '-o', helperTarget, helperSource])
-  await fsp.chmod(helperTarget, 0o755)
+  if (await fileExists(helperSource)) {
+    console.log('[arcade-shell-updater] building uinput-helper')
+    run(compiler, ['-O2', '-s', '-Wall', '-Wextra', '-o', helperTarget, helperSource])
+    await fsp.chmod(helperTarget, 0o755)
+  }
+
+  if (await fileExists(overlaySource)) {
+    console.log('[arcade-shell-updater] building native retro overlay')
+    run(compiler, ['-O2', '-s', '-Wall', '-Wextra', '-o', overlayTarget, overlaySource, '-lX11', '-lXext'])
+    await fsp.chmod(overlayTarget, 0o755)
+  }
+}
+
+async function maybeRepairNativeHelpers(installDir) {
+  const helperSource = path.join(installDir, 'bin', 'uinput-helper.c')
+  const helperTarget = path.join(installDir, 'bin', 'uinput-helper')
+  const overlaySource = path.join(installDir, 'bin', 'arcade-retro-overlay.c')
+  const overlayTarget = path.join(installDir, 'bin', 'arcade-retro-overlay')
+
+  const needsHelperRepair = (await fileExists(helperSource)) && !(await fileExists(helperTarget))
+  const needsOverlayRepair = (await fileExists(overlaySource)) && !(await fileExists(overlayTarget))
+
+  if (!needsHelperRepair && !needsOverlayRepair) return false
+
+  console.log('[arcade-shell-updater] repairing missing native helpers')
+  await maybeBuildRemoteHelper(installDir)
+  return true
 }
 
 async function main() {
@@ -789,8 +813,9 @@ async function main() {
     updaterDest,
     networkTimeoutMs,
   })
+  const helpersRepaired = await maybeRepairNativeHelpers(installDir)
 
-  if (shellUpdated && serviceNames.length > 0) {
+  if ((shellUpdated || helpersRepaired) && serviceNames.length > 0) {
     emitStatus({
       phase: 'shell-restart',
       label: 'Restarting services',

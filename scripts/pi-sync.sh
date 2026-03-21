@@ -50,6 +50,8 @@ LOCAL_INPUT_ENTRY="$ROOT_DIR/apps/service/input.js"
 LOCAL_INPUT_BUNDLE="$LOCAL_BUILD_DIR/input.bundle.cjs"
 LOCAL_UINPUT_HELPER_SOURCE="$ROOT_DIR/apps/service/uinput-helper.c"
 LOCAL_UINPUT_HELPER_STAGE_SOURCE="$LOCAL_BUILD_DIR/uinput-helper.c"
+LOCAL_RETRO_OVERLAY_SOURCE="$ROOT_DIR/apps/service/arcade-retro-overlay.c"
+LOCAL_RETRO_OVERLAY_STAGE_SOURCE="$LOCAL_BUILD_DIR/arcade-retro-overlay.c"
 LOCAL_UPDATER_SOURCE="$ROOT_DIR/scripts/arcade-shell-updater.mjs"
 LOCAL_OS_DIR="$ROOT_DIR/os"
 LOCAL_ROMS_DIR="$ROOT_DIR/roms"
@@ -112,6 +114,7 @@ restart_needed_message() {
 
 mkdir -p "$LOCAL_BUILD_DIR"
 rm -f "$LOCAL_INPUT_BUNDLE" "$LOCAL_UINPUT_HELPER_STAGE_SOURCE"
+rm -f "$LOCAL_RETRO_OVERLAY_STAGE_SOURCE"
 mkdir -p "$LOCAL_BUILD_DIR/ui-dist"
 rm -rf "$LOCAL_BUILD_DIR/ui-dist"
 
@@ -152,6 +155,13 @@ if [[ "$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
   fi
 
   cp "$LOCAL_UINPUT_HELPER_SOURCE" "$LOCAL_UINPUT_HELPER_STAGE_SOURCE"
+
+  if [[ ! -f "$LOCAL_RETRO_OVERLAY_SOURCE" ]]; then
+    echo "[pi-sync] Missing native overlay source: $LOCAL_RETRO_OVERLAY_SOURCE"
+    exit 1
+  fi
+
+  cp "$LOCAL_RETRO_OVERLAY_SOURCE" "$LOCAL_RETRO_OVERLAY_STAGE_SOURCE"
 fi
 
 echo "[pi-sync] Preparing remote staging directory"
@@ -182,6 +192,11 @@ if [[ "$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
   rsync "${RSYNC_ARGS[@]}" -e "${ssh_cmd[*]}" \
     "$LOCAL_UINPUT_HELPER_STAGE_SOURCE" \
     "$PI_REMOTE_HOST:$PI_REMOTE_STAGE_DIR/bin/uinput-helper.c"
+
+  echo "[pi-sync] Uploading native overlay source for remote build"
+  rsync "${RSYNC_ARGS[@]}" -e "${ssh_cmd[*]}" \
+    "$LOCAL_RETRO_OVERLAY_STAGE_SOURCE" \
+    "$PI_REMOTE_HOST:$PI_REMOTE_STAGE_DIR/bin/arcade-retro-overlay.c"
 fi
 
 if [[ "$PI_SYNC_UPDATER" == "1" ]]; then
@@ -325,6 +340,19 @@ if [[ "\$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
     -o "\$build_tmp" \
     "\$PI_REMOTE_STAGE_DIR/bin/uinput-helper.c"
   sudo_cmd install -D -m 0755 "\$build_tmp" "\$PI_REMOTE_RUNTIME_BIN_DIR/uinput-helper"
+
+  echo "[pi-sync:remote] Building and installing native overlay -> \$PI_REMOTE_RUNTIME_BIN_DIR/arcade-retro-overlay"
+  overlay_tmp="\$PI_REMOTE_STAGE_DIR/bin/arcade-retro-overlay"
+  "\$compiler" \
+    -O2 \
+    -s \
+    -Wall \
+    -Wextra \
+    -o "\$overlay_tmp" \
+    "\$PI_REMOTE_STAGE_DIR/bin/arcade-retro-overlay.c" \
+    -lX11 \
+    -lXext
+  sudo_cmd install -D -m 0755 "\$overlay_tmp" "\$PI_REMOTE_RUNTIME_BIN_DIR/arcade-retro-overlay"
 fi
 
 if [[ "\$PI_SYNC_UPDATER" == "1" && -f "\$PI_REMOTE_STAGE_DIR/scripts/arcade-shell-updater.mjs" ]]; then

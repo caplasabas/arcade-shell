@@ -42,9 +42,6 @@ export function ArcadeShellVersionBadge({ deviceId, ethernetIp, wifiIp }: Props)
     .trim()
     .slice(0, 12)
   const ipLabel = ethernetIp?.trim() || wifiIp?.trim() || 'n/a'
-  const label = normalizedDeviceId
-    ? `${normalizedDeviceId} - ${version} ${ipLabel}`
-    : `${version} ${ipLabel}`
 
   return (
     <div
@@ -53,19 +50,25 @@ export function ArcadeShellVersionBadge({ deviceId, ethernetIp, wifiIp }: Props)
         right: 12,
         bottom: 10,
         fontSize: 12,
-        opacity: 0.9,
+        opacity: 0.6,
         pointerEvents: 'none',
         zIndex: 100001,
         color: '#fff',
         textShadow: '0 1px 2px rgba(0,0,0,0.85)',
         fontVariantNumeric: 'tabular-nums',
         background: 'rgba(0, 0, 0, 0.45)',
-        borderRadius: 999,
-        padding: '4px 10px',
+        borderRadius: 10,
+        padding: '6px 10px',
         letterSpacing: '0.03em',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-end',
+        lineHeight: 1.2,
+        gap: 2,
       }}
     >
-      {label}
+      <div style={{ fontSize: 13, fontWeight: 700 }}>{version}</div>
+      <div>{normalizedDeviceId ? `${normalizedDeviceId} - ${ipLabel}` : ipLabel}</div>
     </div>
   )
 }

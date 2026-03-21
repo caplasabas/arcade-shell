@@ -20,11 +20,16 @@ KIOSK_PROFILE_DIR="/tmp/arcade-ui-chromium-profile"
 rm -rf "$KIOSK_PROFILE_DIR"
 install -d -m 0700 "$KIOSK_PROFILE_DIR"
 
+WINDOW_SIZE="$(xwininfo -root 2>/dev/null | awk '/-geometry/ { split($2, parts, "+"); print parts[1]; exit }')"
+if [[ -z "$WINDOW_SIZE" ]]; then
+  WINDOW_SIZE="1440x900"
+fi
+
 exec /usr/lib/chromium/chromium \
   --kiosk \
   http://localhost:5174 \
   --window-position=0,0 \
-  --window-size=1440,900 \
+  --window-size="${WINDOW_SIZE/x/,}" \
   --start-fullscreen \
   --no-first-run \
   --disable-infobars \

@@ -460,6 +460,35 @@ button:focus-visible {
     text-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
 }
 
+.boot-loading-footer {
+    position: absolute;
+    left: 50%;
+    bottom: 38px;
+    transform: translateX(-50%);
+    width: min(92vw, 980px);
+    padding: 0 16px;
+    text-align: center;
+}
+
+.boot-loading-footer-spinner {
+    width: 20px;
+    height: 20px;
+    margin: 0 auto 10px;
+    border: 3px solid rgba(214, 160, 56, 0.28);
+    border-top-color: rgba(255, 214, 120, 0.95);
+    border-radius: 50%;
+    animation: boot-spin 0.8s linear infinite;
+    box-shadow: 0 0 14px rgba(214, 160, 56, 0.18);
+}
+
+.boot-loading-footer-value {
+    color: rgba(233, 191, 92, 0.96);
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    word-break: break-word;
+}
+
 @keyframes boot-spin {
     to {
         transform: rotate(360deg);
@@ -470,15 +499,15 @@ button:focus-visible {
 .top-status-bar {
     position: fixed;
     top: 0;
-    /*left: 0;*/
+    left: 0;
     right: 0;
 
     height: 50px;
-    padding: 20px;
-    gap: 1rem;
+    padding: 20px 12px 20px 20px;
+    gap: 0.55rem;
 
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
 
     background: rgba(0, 0, 0, 0.6);
@@ -489,9 +518,135 @@ button:focus-visible {
     z-index: 20000;
 }
 
+.top-status-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+}
+
+.top-status-network {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.top-status-ssid {
+    max-width: 280px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: rgba(255, 216, 77, 0.78);
+    letter-spacing: 0.08em;
+}
+
+.settings-cog {
+    width: 42px;
+    height: 42px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(20, 18, 15, 0.45);
+    color: rgba(255, 216, 77, 0.38);
+    padding: 0;
+    margin-left: 2px;
+    box-shadow: none;
+    transition: color 140ms ease, background 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.settings-cog.focused {
+    background: rgba(255, 216, 77, 0.12);
+    box-shadow: 0 0 22px rgba(255, 216, 77, 0.36);
+    color: #fff6bf;
+    transform: scale(1.05);
+}
+
 .modal-card-wide {
     width: min(980px, 88vw);
     min-height: auto;
+}
+
+.modal-card-settings {
+    width: min(680px, 76vw);
+    min-height: auto;
+}
+
+.settings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 58px;
+    padding: 0 18px;
+    border: 2px solid #52462c;
+    border-radius: 6px;
+    background: rgba(15, 14, 12, 0.9);
+}
+
+.settings-row.active {
+    border-color: #ffd84d;
+    background: rgba(68, 53, 18, 0.55);
+    box-shadow: inset 0 0 0 1px rgba(255, 216, 77, 0.18);
+}
+
+.settings-label,
+.settings-value {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 28px;
+    letter-spacing: 0.05em;
+}
+
+.settings-value {
+    color: #f5df9a;
+}
+
+.settings-volume-block {
+    min-width: 220px;
+}
+
+.settings-volume-value {
+    color: #f5df9a;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 24px;
+    letter-spacing: 0.05em;
+    text-align: right;
+}
+
+.settings-volume-meter {
+    margin-top: 8px;
+    width: 220px;
+    height: 12px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(255, 216, 77, 0.18);
+}
+
+.settings-volume-meter-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #b96b31 0%, #e2a93b 55%, #ffe08a 100%);
+    box-shadow: 0 0 16px rgba(255, 216, 77, 0.28);
+}
+
+.settings-hint {
+    margin-top: 18px;
+    color: #f2ddb0;
+    font-size: 18px;
+    letter-spacing: 0.06em;
+}
+
+.settings-footer {
+    margin-top: 10px;
+    color: #b7b19e;
+    font-size: 15px;
+    letter-spacing: 0.08em;
 }
 
 .modal-network-picker {

@@ -239,6 +239,7 @@ const RETROARCH_PULSE_SERVER =
 const RETROARCH_USE_DBUS_RUN_SESSION = process.env.RETROARCH_USE_DBUS_RUN_SESSION === '1'
 const RETROARCH_PRIMARY_INPUT = String(process.env.RETROARCH_PRIMARY_INPUT || 'P1').toUpperCase()
 const CASINO_MENU_EXITS_RETROARCH = process.env.CASINO_MENU_EXITS_RETROARCH !== '0'
+const RETROARCH_P2_SWAP_AXES = process.env.RETROARCH_P2_SWAP_AXES === '1'
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '')
   .trim()
   .replace(/\/+$/, '')
@@ -248,6 +249,7 @@ console.log('[RETRO MODE]', {
   SINGLE_X_MODE,
   RETROARCH_USE_TTY_MODE,
   RETROARCH_TTY_X_SESSION,
+  RETROARCH_P2_SWAP_AXES,
   DISPLAY: process.env.DISPLAY || null,
   XAUTHORITY: process.env.XAUTHORITY || null,
 })
@@ -752,8 +754,17 @@ function isLifePurchaseButton(index) {
 }
 
 function getArcadeLifePromptActionLabel() {
+  if (retroarchActive) return 'START'
   if (ARCADE_LIFE_PURCHASE_LABEL === 'START') return 'START'
   return `START OR ${ARCADE_LIFE_PURCHASE_LABEL}`
+}
+
+function normalizeArcadeJoinMode(value) {
+  const mode = String(value || 'simultaneous')
+    .toLowerCase()
+    .trim()
+  if (mode === 'alternating' || mode === 'single_only') return mode
+  return 'simultaneous'
 }
 
 function normalizeArcadePlayer(source) {
@@ -770,7 +781,7 @@ function sendRetroarchNetCommand(command, options = {}) {
   const message = `${clean}\n`
   if (!message.trim()) return
   const urgent = options?.urgent === true
-  const retryCount = urgent ? 3 : ARCADE_RETRO_OSD_RETRY_COUNT
+  const retryCount = Math.max(1, ARCADE_RETRO_OSD_RETRY_COUNT)
   const retryIntervalMs = urgent ? 60 : ARCADE_RETRO_OSD_RETRY_INTERVAL_MS
 
   const sendViaStdin = attempt => {
@@ -837,8 +848,8 @@ function showArcadeOsdMessage(message, options = {}) {
 
   const osdCommands = (() => {
     if (RETROARCH_OSD_COMMAND === 'AUTO') return ['SHOW_MESG', 'SHOW_MSG']
-    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG', 'SHOW_MESG']
-    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG', 'SHOW_MSG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MSG') return ['SHOW_MSG']
+    if (RETROARCH_OSD_COMMAND === 'SHOW_MESG') return ['SHOW_MESG']
     return [RETROARCH_OSD_COMMAND]
   })()
 
@@ -854,19 +865,6 @@ function showArcadeOsdMessage(message, options = {}) {
 function formatArcadeBalanceForOsd(rawBalance) {
   if (rawBalance === null || rawBalance === undefined) return '0.00'
   return formatPeso(toMoney(rawBalance, 0))
-}
-
-function isArcadePlayerLocked(source) {
-  if (!retroarchActive || !arcadeSession?.active) return false
-
-  const player = normalizeArcadePlayer(source)
-  if (!player) return false
-
-  return !playerHasStoredCredit(player)
-}
-
-function isAllowedLockedInput(index) {
-  return isStartButton(index)
 }
 
 function isBlockedCasinoActionDuringRetroarch(action) {
@@ -944,25 +942,29 @@ function getArcadeRetroFooterState(balanceOverride = null) {
   const exitConfirmArmed = Number(retroarchExitConfirmUntil || 0) > now
   const p1HasCredit = Number(arcadeSession?.playerLivesPurchased?.P1 || 0) > 0
   const p2HasCredit = Number(arcadeSession?.playerLivesPurchased?.P2 || 0) > 0
-  const latestSuccessfulChargeAt = Math.max(
-    Number(arcadeSession?.successfulChargeAt?.P1 || 0),
-    Number(arcadeSession?.successfulChargeAt?.P2 || 0),
-  )
-  const hideAfterCreditElapsed =
-    latestSuccessfulChargeAt > 0 &&
-    ARCADE_RETRO_OVERLAY_HIDE_AFTER_CREDIT_MS >= 0 &&
-    now - latestSuccessfulChargeAt >= ARCADE_RETRO_OVERLAY_HIDE_AFTER_CREDIT_MS
+  const joinMode = normalizeArcadeJoinMode(arcadeSession?.joinMode)
+  const sessionPhase = String(arcadeSession?.sessionPhase || 'prestart')
+  const p2BlockedMidRun = joinMode === 'alternating' && sessionPhase === 'live'
+  const p2Disabled = joinMode === 'single_only'
 
   const leftBase = p1HasCredit ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
   const centerBase = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
-  const rightBase = p2HasCredit ? 'CREDITS 1' : p2ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
+  const rightBase = p2HasCredit
+    ? 'CREDITS 1'
+    : p2ConfirmArmed
+      ? 'START GAME?'
+      : p2Disabled
+        ? '1 PLAYER ONLY'
+        : p2BlockedMidRun
+          ? 'NEXT TURN'
+          : 'PRESS [START]'
   const visible = Boolean(
     arcadeOverlayNotice ||
       exitConfirmArmed ||
       p1ConfirmArmed ||
       p2ConfirmArmed ||
-      (!p1HasCredit && !p2HasCredit) ||
-      (!hideAfterCreditElapsed && (p1HasCredit || p2HasCredit)),
+      !p1HasCredit ||
+      !p2HasCredit,
   )
 
   return {
@@ -975,6 +977,8 @@ function getArcadeRetroFooterState(balanceOverride = null) {
     rightText: arcadeOverlayNotice?.slot === 'right' ? arcadeOverlayNotice.text : rightBase,
     p1HasCredit,
     p2HasCredit,
+    joinMode,
+    sessionPhase,
     p1ConfirmArmed,
     p2ConfirmArmed,
     exitConfirmArmed,
@@ -994,6 +998,8 @@ function getArcadeRetroOverlayState() {
     gameName: arcadeSession?.gameName || null,
     gameId: arcadeSession?.gameId || null,
     pricePerLife: arcadeSession?.active ? getArcadeSessionPrice() : null,
+    joinMode: arcadeSession?.active ? normalizeArcadeJoinMode(arcadeSession?.joinMode) : null,
+    sessionPhase: arcadeSession?.active ? arcadeSession?.sessionPhase || 'prestart' : null,
     balance:
       arcadeSession?.lastKnownBalance === null || arcadeSession?.lastKnownBalance === undefined
         ? null
@@ -1072,6 +1078,40 @@ function playerHasStoredCredit(player) {
   return Number(arcadeSession.playerLivesPurchased?.[player] || 0) > 0
 }
 
+function shouldPromoteArcadeSessionToLive(player, index) {
+  if (!arcadeSession?.active) return false
+  if (!playerHasStoredCredit(player)) return false
+  if (isStartButton(index)) return false
+  return true
+}
+
+function markArcadeSessionLive(reason = 'gameplay_input') {
+  if (!arcadeSession?.active) return
+  if (arcadeSession.sessionPhase === 'live') return
+  arcadeSession.sessionPhase = 'live'
+  broadcastArcadeLifeState('live', { reason, sessionPhase: 'live' })
+  refreshArcadeOsdMessage()
+}
+
+function isArcadePurchaseAllowed(player) {
+  if (!arcadeSession?.active) return true
+  if (player !== 'P1' && player !== 'P2') return false
+
+  const joinMode = normalizeArcadeJoinMode(arcadeSession.joinMode)
+  const sessionPhase = String(arcadeSession.sessionPhase || 'prestart')
+
+  if (joinMode === 'single_only') return player === 'P1'
+  if (joinMode === 'alternating' && sessionPhase === 'live' && player === 'P2') return false
+  return true
+}
+
+function getBlockedPurchaseMessage(player) {
+  const joinMode = normalizeArcadeJoinMode(arcadeSession?.joinMode)
+  if (joinMode === 'single_only') return '1 PLAYER ONLY'
+  if (joinMode === 'alternating' && player === 'P2') return 'P2 NEXT TURN'
+  return 'START UNAVAILABLE'
+}
+
 function clearArcadePromptLoop() {
   if (arcadePromptLoopTimer !== null) {
     clearTimeout(arcadePromptLoopTimer)
@@ -1087,12 +1127,14 @@ function buildArcadePromptMessage() {
 
   const p1HasCredit = playerHasStoredCredit('P1')
   const p2HasCredit = playerHasStoredCredit('P2')
+  const joinMode = normalizeArcadeJoinMode(arcadeSession.joinMode)
+  const sessionPhase = String(arcadeSession.sessionPhase || 'prestart')
+  const p2PurchaseAllowed = isArcadePurchaseAllowed('P2')
 
   const waitingP1 = !p1HasCredit && !arcadeContinueCountdownTimers.P1
   const waitingP2 = !p2HasCredit && !arcadeContinueCountdownTimers.P2
 
   if (waitingP1 || waitingP2) {
-    if (p1HasCredit || p2HasCredit) return ''
     const priceText = getArcadeSessionPrice().toFixed(2)
     const actionLabel = getArcadeLifePromptActionLabel()
 
@@ -1101,6 +1143,11 @@ function buildArcadePromptMessage() {
     }
     if (waitingP1) {
       return composeArcadeOsdOverlay(`P1 PRESS ${actionLabel} (P${priceText})`)
+    }
+    if (!p2PurchaseAllowed) {
+      return composeArcadeOsdOverlay(
+        joinMode === 'alternating' && sessionPhase === 'live' ? 'P2 NEXT TURN' : '1 PLAYER ONLY',
+      )
     }
     return composeArcadeOsdOverlay(`P2 PRESS ${actionLabel} (P${priceText})`)
   }
@@ -1114,6 +1161,11 @@ function buildArcadePromptMessage() {
     }
     if (!p1HasCredit) {
       return composeArcadeOsdOverlay(`P1 LOCKED | PRESS ${actionLabel} (P${priceText})`)
+    }
+    if (!p2PurchaseAllowed) {
+      return composeArcadeOsdOverlay(
+        joinMode === 'alternating' && sessionPhase === 'live' ? 'P2 NEXT TURN' : '1 PLAYER ONLY',
+      )
     }
     return composeArcadeOsdOverlay(`P2 LOCKED | PRESS ${actionLabel} (P${priceText})`)
   }
@@ -1225,6 +1277,8 @@ function broadcastArcadeLifeState(status = 'state', extra = {}) {
     gameId: arcadeSession.gameId,
     gameName: arcadeSession.gameName,
     pricePerLife: arcadeSession.pricePerLife,
+    joinMode: normalizeArcadeJoinMode(arcadeSession.joinMode),
+    sessionPhase: arcadeSession.sessionPhase || 'prestart',
     p1Unlocked: playerHasStoredCredit('P1'),
     p2Unlocked: playerHasStoredCredit('P2'),
     p1LivesPurchased: Number(arcadeSession.playerLivesPurchased?.P1 || 0),
@@ -1308,7 +1362,13 @@ function scheduleArcadeBalanceSyncLoop() {
   tick()
 }
 
-function startArcadeLifeSession({ gameId, gameName, pricePerLife, initialBalance = null }) {
+function startArcadeLifeSession({
+  gameId,
+  gameName,
+  pricePerLife,
+  initialBalance = null,
+  joinMode = 'simultaneous',
+}) {
   clearArcadeBalanceSyncLoop()
   clearArcadePromptLoop()
   clearArcadeContinueCountdown()
@@ -1319,6 +1379,8 @@ function startArcadeLifeSession({ gameId, gameName, pricePerLife, initialBalance
     gameId: String(gameId || '').trim() || 'unknown',
     gameName: String(gameName || '').trim() || String(gameId || '').trim() || 'Arcade Game',
     pricePerLife: toMoney(pricePerLife, ARCADE_LIFE_PRICE_DEFAULT),
+    joinMode: normalizeArcadeJoinMode(joinMode),
+    sessionPhase: 'prestart',
     playerUnlocked: { P1: false, P2: false },
     playerLivesPurchased: { P1: 0, P2: 0 },
     purchaseInFlight: { P1: false, P2: false },
@@ -1381,7 +1443,7 @@ async function fetchGameProfileForArcadeLife(gameId) {
 
   const url =
     `${SUPABASE_URL}/rest/v1/games?` +
-    `select=id,name,price,type,enabled&id=eq.${encodeURIComponent(safeId)}&type=eq.arcade&limit=1`
+    `select=id,name,price,type,enabled,join_mode&id=eq.${encodeURIComponent(safeId)}&type=eq.arcade&limit=1`
 
   try {
     const response = await requestJsonWithCurl(url, {
@@ -1403,6 +1465,7 @@ async function fetchGameProfileForArcadeLife(gameId) {
       gameId: row.id || safeId,
       gameName: row.name || safeId,
       pricePerLife: toMoney(row.price, ARCADE_LIFE_PRICE_DEFAULT),
+      joinMode: normalizeArcadeJoinMode(row.join_mode),
     }
   } catch (err) {
     console.error('[ARCADE LIFE] game profile fetch error', err?.message || err)
@@ -1410,9 +1473,69 @@ async function fetchGameProfileForArcadeLife(gameId) {
   }
 }
 
+async function fetchCabinetGamesForDevice(deviceId = DEVICE_ID) {
+  if (!hasSupabaseRpcConfig()) return []
+
+  const safeDeviceId = String(deviceId || '').trim()
+  if (!safeDeviceId) return []
+
+  const url =
+    `${SUPABASE_URL}/rest/v1/cabinet_games?` +
+    `select=device_id,game_id,games!inner(` +
+    `id,name,type,price,join_mode,box_art_url,emulator_core,rom_path,package_url,version,enabled` +
+    `)&device_id=eq.${encodeURIComponent(safeDeviceId)}&installed=eq.true&games.enabled=eq.true`
+
+  try {
+    const response = await requestJsonWithCurl(url, {
+      method: 'GET',
+      headers: getSupabaseHeaders(),
+      timeoutMs: 2500,
+    })
+    if (!response.ok) {
+      const text = response.text || ''
+      console.error('[CABINET GAMES] fetch failed', response.status, text)
+      return []
+    }
+
+    const rows = response.json()
+    if (!Array.isArray(rows)) return []
+
+    return rows
+      .map(row => row?.games)
+      .filter(Boolean)
+      .map(game => ({
+        id: game.id,
+        name: game.name,
+        type: game.type,
+        price: toMoney(game.price, 0),
+        join_mode: normalizeArcadeJoinMode(game.join_mode),
+        art: String(game.box_art_url || '').startsWith('assets/boxart/')
+          ? `/roms/boxart/${String(game.box_art_url).slice('assets/boxart/'.length)}`
+          : String(game.box_art_url || ''),
+        emulator_core: game.emulator_core || null,
+        rom_path: game.rom_path || null,
+        package_url: game.package_url || null,
+        version: Number(game.version || 1),
+      }))
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+  } catch (err) {
+    console.error('[CABINET GAMES] fetch error', err?.message || err)
+    return []
+  }
+}
+
 async function consumeArcadeLifeCharge({ player, reason = 'start' }) {
   const pricePerLife = getArcadeSessionPrice()
   const gameId = arcadeSession?.gameId || 'unknown'
+
+  if (!hasLocalNetworkLink()) {
+    return {
+      ok: false,
+      balance: arcadeSession?.lastKnownBalance ?? null,
+      chargedAmount: 0,
+      reason: 'payment_offline',
+    }
+  }
 
   if (!hasSupabaseRpcConfig()) {
     if (ARCADE_LIFE_FAIL_OPEN) {
@@ -1531,7 +1654,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
 
   sessionRef.lastChargeAt[player] = now
   sessionRef.purchaseInFlight[player] = true
-  setArcadeOverlayNotice(`P${player.slice(1)} PROCESSING...`, 1600, 'center')
+  setArcadeOverlayNotice(`P${player.slice(1)} PROCESSING...`, 0, 'center')
 
   consumeArcadeLifeCharge({ player, reason })
     .then(result => {
@@ -1572,13 +1695,18 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
       const priceText = getArcadeSessionPrice().toFixed(2)
       const balanceText = formatArcadeBalanceForOsd(result.balance)
 
-      setArcadeOverlayNotice(`INSUFFICIENT BALANCE`, 2200, 'center')
-      showArcadeOsdMessage(
-        composeArcadeOsdOverlay(
-          `Insufficient Balance Needed P${priceText} Balance P${balanceText}`,
-          result.balance,
-        ),
-      )
+      if (String(result.reason || '').toLowerCase().includes('offline')) {
+        setArcadeOverlayNotice(`OFFLINE`, 2200, 'center')
+        showArcadeOsdMessage(composeArcadeOsdOverlay(`OFFLINE`, result.balance))
+      } else {
+        setArcadeOverlayNotice(`INSUFFICIENT BALANCE`, 2200, 'center')
+        showArcadeOsdMessage(
+          composeArcadeOsdOverlay(
+            `Insufficient Balance Needed P${priceText} Balance P${balanceText}`,
+            result.balance,
+          ),
+        )
+      }
       if (ARCADE_LIFE_CONTINUE_SECONDS > 0) {
         setTimeout(() => {
           if (!arcadeSession?.active || arcadeSession !== sessionRef) return
@@ -2213,9 +2341,10 @@ function resolveKeyName(code) {
 function handleRawAxis(source, code, value) {
   const DEAD_LOW = 40
   const DEAD_HIGH = 215
-  const effectiveCode = source === 'P2' && retroarchActive ? (code === 0 ? 1 : code === 1 ? 0 : code) : code
+  const shouldSwapP2Axes = source === 'P2' && retroarchActive && RETROARCH_P2_SWAP_AXES
+  const effectiveCode = shouldSwapP2Axes ? (code === 0 ? 1 : code === 1 ? 0 : code) : code
   const effectiveValue =
-    source === 'P2' && retroarchActive && effectiveCode === 0 && Number.isFinite(value)
+    shouldSwapP2Axes && effectiveCode === 0 && Number.isFinite(value)
       ? 255 - value
       : value
 
@@ -2259,28 +2388,8 @@ function handleRawAxis(source, code, value) {
   const mappedSource = resolveRetroInputSource(source)
   const target = getRetroVirtualTarget(source)
   if (!target || !retroarchActive) return
-
-  if (isArcadePlayerLocked(source)) {
-    const state = dpadState[mappedSource]
-
-    if (state.up) {
-      state.up = false
-      sendVirtual(target, EV_KEY, BTN_DPAD_UP, 0)
-    }
-    if (state.down) {
-      state.down = false
-      sendVirtual(target, EV_KEY, BTN_DPAD_DOWN, 0)
-    }
-    if (state.left) {
-      state.left = false
-      sendVirtual(target, EV_KEY, BTN_DPAD_LEFT, 0)
-    }
-    if (state.right) {
-      state.right = false
-      sendVirtual(target, EV_KEY, BTN_DPAD_RIGHT, 0)
-    }
-
-    return
+  if (shouldPromoteArcadeSessionToLive(mappedSource, -1)) {
+    markArcadeSessionLive('axis_input')
   }
 
   const state = dpadState[mappedSource]
@@ -2344,12 +2453,6 @@ function handleKey(source, index, value) {
       }
 
       routePlayerInput('P1', index, value)
-      return
-    }
-
-    if (retroarchActive && arcadeSession?.active && isLifePurchaseButton(index)) {
-      const primaryPlayer = normalizeArcadePlayer(RETROARCH_PRIMARY_INPUT) || 'P1'
-      routePlayerInput(primaryPlayer, index, value)
       return
     }
 
@@ -2418,6 +2521,12 @@ function routePlayerInput(source, index, value) {
 
     const player = normalizeArcadePlayer(source)
     if (!player) return
+    const playerAction = JOYSTICK_BUTTON_MAP[index]
+
+    if (value === 1 && playerAction === 'MENU' && CASINO_MENU_EXITS_RETROARCH) {
+      handleRetroarchMenuExitIntent()
+      return
+    }
 
     const hasStoredCredit = playerHasStoredCredit(player)
     const needsCredit = !hasStoredCredit
@@ -2427,28 +2536,6 @@ function routePlayerInput(source, index, value) {
       if (!player) return
       const hasStoredCredit = playerHasStoredCredit(player)
       const needsCredit = !hasStoredCredit
-
-      if (isLifePurchaseButton(index)) {
-        if (value === 1) {
-          if (hasStoredCredit) {
-            showArcadeOsdMessage(
-              composeArcadeOsdOverlay(`P${player.slice(1)} ALREADY HAS CREDIT`),
-              {
-                bypassCooldown: true,
-              },
-            )
-          } else {
-            const priceText = getArcadeSessionPrice().toFixed(2)
-            showArcadeOsdMessage(
-              composeArcadeOsdOverlay(`P${player.slice(1)} PRESS START (P${priceText})`),
-              {
-                bypassCooldown: true,
-              },
-            )
-          }
-        }
-        return
-      }
 
       if (isStartButton(index)) {
         if (value === 1) {
@@ -2468,6 +2555,24 @@ function routePlayerInput(source, index, value) {
 
         if (needsCredit) {
           if (value === 1) {
+            if (!isArcadePurchaseAllowed(player)) {
+              setArcadeOverlayNotice(
+                getBlockedPurchaseMessage(player),
+                1800,
+                player === 'P1' ? 'left' : 'right',
+              )
+              showArcadeOsdMessage(composeArcadeOsdOverlay(getBlockedPurchaseMessage(player)), {
+                bypassCooldown: true,
+                urgent: true,
+              })
+              broadcastArcadeLifeState('purchase_blocked', {
+                player,
+                joinMode: normalizeArcadeJoinMode(arcadeSession.joinMode),
+                sessionPhase: arcadeSession.sessionPhase || 'prestart',
+              })
+              return
+            }
+
             const now = Date.now()
             const confirmUntil = Number(arcadeSession.startConfirmUntil?.[player] || 0)
 
@@ -2502,6 +2607,10 @@ function routePlayerInput(source, index, value) {
         sendVirtual(target, EV_KEY, keyCode, value)
         return
       }
+    }
+
+    if (value === 1 && shouldPromoteArcadeSessionToLive(player, index)) {
+      markArcadeSessionLive('player_input')
     }
 
     // Forward real press/release state
@@ -2595,7 +2704,6 @@ function scheduleArcadeCreditExpiry(player) {
 
     arcadeSession.playerLivesPurchased[player] = 0
     arcadeSession.startConfirmUntil[player] = 0
-    releaseAllVirtualInputsForPlayer(player)
     arcadeCreditExpiryTimers[player] = null
 
     if (
@@ -2672,16 +2780,19 @@ function setArcadeOverlayNotice(text, ttlMs = 1600, slot = 'center') {
 
   if (arcadeOverlayNoticeTimer !== null) {
     clearTimeout(arcadeOverlayNoticeTimer)
+    arcadeOverlayNoticeTimer = null
   }
 
-  arcadeOverlayNoticeTimer = setTimeout(
-    () => {
-      arcadeOverlayNoticeTimer = null
-      arcadeOverlayNotice = null
-      refreshArcadeOsdMessage()
-    },
-    Math.max(250, ttlMs),
-  )
+  if (Number.isFinite(ttlMs) && ttlMs > 0) {
+    arcadeOverlayNoticeTimer = setTimeout(
+      () => {
+        arcadeOverlayNoticeTimer = null
+        arcadeOverlayNotice = null
+        refreshArcadeOsdMessage()
+      },
+      Math.max(250, ttlMs),
+    )
+  }
 }
 
 function refreshArcadeOsdMessage() {
@@ -3119,6 +3230,71 @@ function normalizeRuntimeIndexHtml(indexPath) {
   return true
 }
 
+const NO_AUDIO_DEVICE_PATTERN =
+  /cannot find card|no such file|mixer attach|audio open error|invalid ctl|default.*not found/i
+
+function isNoAudioDeviceError(error, stderr = '') {
+  const message = `${error?.message || ''}\n${stderr || ''}`
+  return NO_AUDIO_DEVICE_PATTERN.test(message)
+}
+
+function parseSpeakerVolumeState(controlStdout, stateStdout) {
+  const controlText = String(controlStdout || '')
+  const stateText = String(stateStdout || '')
+
+  const rawRangeMatch = controlText.match(/min=(\d+),max=(\d+)/)
+  const rawValueMatch = controlText.match(/:\s*values=(\d+)(?:,(\d+))?/)
+  const dbRangeMatch = controlText.match(/dBminmaxmute-min=([-\d.]+)dB,max=([-\d.]+)dB/)
+  const dbValueMatch = stateText.match(/\[([-\d.]+)dB\]/)
+
+  if (!rawRangeMatch || !rawValueMatch) {
+    throw new Error('Unable to parse Speaker control range')
+  }
+
+  const rawMin = Number(rawRangeMatch[1])
+  const rawMax = Number(rawRangeMatch[2])
+  const rawValue = Number(rawValueMatch[1])
+  const dbMin = dbRangeMatch ? Number(dbRangeMatch[1]) : null
+  const dbMax = dbRangeMatch ? Number(dbRangeMatch[2]) : null
+  const dbValue = dbValueMatch ? Number(dbValueMatch[1]) : null
+  const percent = rawMax > rawMin ? Math.round(((rawValue - rawMin) / (rawMax - rawMin)) * 100) : 0
+
+  return {
+    success: true,
+    control: 'Speaker',
+    rawValue,
+    rawMin,
+    rawMax,
+    percent: Math.max(0, Math.min(100, percent)),
+    db: dbValue,
+    dbMin,
+    dbMax,
+    volume: dbValue === null ? `${percent}%` : `${dbValue.toFixed(1)} dB`,
+  }
+}
+
+async function getSpeakerVolumeState() {
+  try {
+    const control = await execFileAsync('amixer', ['-c', '0', 'cget', 'numid=6'])
+    const state = await execFileAsync('amixer', ['-c', '0', 'sget', 'Speaker'])
+    return parseSpeakerVolumeState(control.stdout, state.stdout)
+  } catch (error) {
+    if (isNoAudioDeviceError(error, error?.stderr || '')) {
+      return {
+        success: false,
+        error: 'NO_AUDIO_DEVICE',
+        volume: 'NO AUDIO DEVICE',
+        percent: null,
+        db: null,
+        dbMin: null,
+        dbMax: null,
+      }
+    }
+
+    throw error
+  }
+}
+
 function removeRuntimeGamePackage({ id, version, allVersions = false }) {
   const gameId = sanitizePathSegment(id, 'game')
 
@@ -3444,6 +3620,32 @@ const server = http.createServer((req, res) => {
       }
     }
 
+    if (safePath === '/cabinet-games') {
+      const requestedDeviceId = parsedUrl.searchParams.get('deviceId') || DEVICE_ID
+
+      fetchCabinetGamesForDevice(requestedDeviceId)
+        .then(games => {
+          sendJson(res, 200, { success: true, deviceId: requestedDeviceId, games })
+        })
+        .catch(error => {
+          console.error('[CABINET GAMES] endpoint failed', error?.message || error)
+          sendJson(res, 500, { success: false, deviceId: requestedDeviceId, games: [] })
+        })
+      return
+    }
+
+    if (safePath === '/system/volume') {
+      getSpeakerVolumeState()
+        .then(state => {
+          sendJson(res, 200, state)
+        })
+        .catch(error => {
+          console.error('[AUDIO] volume read failed', error?.message || error)
+          sendJson(res, 500, { success: false, error: 'VOLUME_READ_FAILED' })
+        })
+      return
+    }
+
     let filePath = path.join(DIST_DIR, safePath === '/' ? 'index.html' : safePath)
 
     if (!filePath.startsWith(DIST_DIR)) {
@@ -3650,6 +3852,54 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  if (req.method === 'POST' && req.url === '/system/volume') {
+    let body = ''
+    req.on('data', chunk => {
+      body += chunk
+    })
+    req.on('end', async () => {
+      let direction = 'up'
+      try {
+        const payload = body ? JSON.parse(body) : {}
+        direction = String(payload.direction || 'up').trim().toLowerCase() === 'down' ? 'down' : 'up'
+      } catch {
+        // Ignore invalid body and keep the default direction.
+      }
+
+      try {
+        const current = await getSpeakerVolumeState()
+        if (current.error === 'NO_AUDIO_DEVICE') {
+          return sendJson(res, 200, current)
+        }
+
+        let stepCount = 1
+        try {
+          const payload = body ? JSON.parse(body) : {}
+          const parsedStep = Number(payload.step ?? 1)
+          if (Number.isFinite(parsedStep)) {
+            stepCount = Math.max(1, Math.min(8, Math.round(parsedStep)))
+          }
+        } catch {}
+
+        const step = direction === 'down' ? -stepCount : stepCount
+        const nextRaw = Math.max(current.rawMin, Math.min(current.rawMax, current.rawValue + step))
+
+        await execFileAsync('amixer', ['-c', '0', 'cset', 'numid=6', `${nextRaw},${nextRaw}`])
+        await execFileAsync('amixer', ['-c', '0', 'cset', 'numid=5', 'on,on']).catch(() => {})
+
+        const updated = await getSpeakerVolumeState()
+        return sendJson(res, 200, {
+          ...updated,
+          direction,
+        })
+      } catch (error) {
+        console.error('[AUDIO] volume adjust failed', error?.message || error)
+        return sendJson(res, 500, { success: false, error: 'VOLUME_ADJUST_FAILED' })
+      }
+    })
+    return
+  }
+
   if (req.method === 'POST' && req.url === '/arcade-shell-update/run') {
     let body = ''
     req.on('data', chunk => {
@@ -3756,6 +4006,7 @@ const server = http.createServer((req, res) => {
         const payloadGameName = String(payload.name || '').trim()
         const payloadPrice = toMoney(payload.price, ARCADE_LIFE_PRICE_DEFAULT)
         const payloadBalance = toMoney(payload.balance, 0)
+        const payloadJoinMode = normalizeArcadeJoinMode(payload.joinMode)
 
         const duplicateLaunchDuringRecovery =
           Boolean(payloadGameId) &&
@@ -3767,6 +4018,7 @@ const server = http.createServer((req, res) => {
           gameId: payloadGameId || path.basename(payload.rom || '') || 'unknown',
           gameName: payloadGameName || payloadGameId || 'Arcade Game',
           pricePerLife: payloadPrice > 0 ? payloadPrice : ARCADE_LIFE_PRICE_DEFAULT,
+          joinMode: payloadJoinMode,
           initialBalance: payloadBalance,
         }
 
@@ -3797,6 +4049,24 @@ const server = http.createServer((req, res) => {
           })
           res.writeHead(409)
           return res.end('Cooling down')
+        }
+
+        const needsGameProfileFetch =
+          payloadGameId &&
+          (!payloadGameName ||
+            payloadPrice <= 0 ||
+            !payload.joinMode ||
+            normalizeArcadeJoinMode(payload.joinMode) !== payloadJoinMode)
+
+        if (needsGameProfileFetch) {
+          const fetchedGameProfile = await fetchGameProfileForArcadeLife(payloadGameId)
+          if (fetchedGameProfile) {
+            gameProfile = {
+              ...gameProfile,
+              ...fetchedGameProfile,
+              initialBalance: payloadBalance,
+            }
+          }
         }
 
         if (!IS_PI) {
@@ -3994,6 +4264,11 @@ function checkInternetOnce() {
   })
 }
 
+function hasLocalNetworkLink() {
+  const info = getNetworkInfo()
+  return Boolean(info?.ethernet || info?.wifi)
+}
+
 let checkingNetwork = false
 
 async function monitorInternet() {
@@ -4001,18 +4276,23 @@ async function monitorInternet() {
   checkingNetwork = true
 
   const online = await checkInternetOnce()
+  const hasLink = hasLocalNetworkLink()
 
   checkingNetwork = false
 
   if (lastInternetState === null) {
-    lastInternetState = online
+    lastInternetState = online || hasLink
     internetOkStreak = online ? 1 : 0
-    internetFailStreak = online ? 0 : 1
+    internetFailStreak = online || hasLink ? 0 : 1
     return
   }
 
   if (online) {
     internetOkStreak += 1
+    internetFailStreak = 0
+  } else if (hasLink) {
+    // Keep the cabinet usable when Wi-Fi is still associated but WAN/DNS is flaky.
+    internetOkStreak = 0
     internetFailStreak = 0
   } else {
     internetFailStreak += 1

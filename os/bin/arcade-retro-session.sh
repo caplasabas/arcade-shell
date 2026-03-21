@@ -2,12 +2,14 @@
 set -euo pipefail
 
 DISPLAY_VALUE="${DISPLAY:-:1}"
-CHROMIUM_BIN="${ARCADE_RETRO_OVERLAY_CHROMIUM_BIN:-/usr/lib/chromium/chromium}"
-OVERLAY_URL="${ARCADE_RETRO_OVERLAY_URL:-http://127.0.0.1:5174/retro-overlay.html}"
 OVERLAY_ENABLE="${ARCADE_RETRO_OVERLAY_ENABLE:-1}"
 OVERLAY_DELAY_MS="${ARCADE_RETRO_OVERLAY_DELAY_MS:-700}"
 OVERLAY_HEIGHT="${ARCADE_RETRO_OVERLAY_HEIGHT:-40}"
-OVERLAY_PROFILE_DIR="${ARCADE_RETRO_OVERLAY_PROFILE_DIR:-/tmp/arcade-retro-overlay-profile}"
+OVERLAY_POLL_MS="${ARCADE_RETRO_OVERLAY_POLL_MS:-250}"
+OVERLAY_BIN="${ARCADE_RETRO_OVERLAY_BIN:-/opt/arcade/bin/arcade-retro-overlay}"
+OVERLAY_HOST="${ARCADE_RETRO_OVERLAY_HOST:-127.0.0.1}"
+OVERLAY_PORT="${ARCADE_RETRO_OVERLAY_PORT:-5174}"
+OVERLAY_PATH="${ARCADE_RETRO_OVERLAY_PATH:-/arcade-life/overlay-state}"
 RETROARCH_BIN="${ARCADE_RETRO_BIN:-retroarch}"
 RETRO_RUN_USER="${ARCADE_RETRO_RUN_USER:-arcade1}"
 RETRO_RUN_HOME="${ARCADE_RETRO_RUN_HOME:-/home/${RETRO_RUN_USER}}"
@@ -57,15 +59,9 @@ xset s noblank
 
 unclutter_pid=""
 overlay_pid=""
-overlay_watcher_pid=""
 retroarch_pid=""
 
 cleanup() {
-  if [[ -n "$overlay_watcher_pid" ]]; then
-    kill "$overlay_watcher_pid" >/dev/null 2>&1 || true
-    wait "$overlay_watcher_pid" 2>/dev/null || true
-  fi
-
   if [[ -n "$overlay_pid" ]]; then
     kill "$overlay_pid" >/dev/null 2>&1 || true
     wait "$overlay_pid" 2>/dev/null || true
@@ -136,36 +132,27 @@ launch_overlay() {
     return
   fi
 
-  if [[ ! -x "$CHROMIUM_BIN" ]]; then
-    echo "[arcade-retro-session] overlay skipped, chromium missing: $CHROMIUM_BIN" >&2
+  if [[ ! -x "$OVERLAY_BIN" ]]; then
+    echo "[arcade-retro-session] overlay skipped, native overlay missing: $OVERLAY_BIN" >&2
     return
   fi
 
-  if pgrep -u "$RETRO_RUN_USER" -f "$OVERLAY_PROFILE_DIR" >/dev/null 2>&1; then
+  if [[ -n "$overlay_pid" ]] && kill -0 "$overlay_pid" >/dev/null 2>&1; then
     log "overlay already running"
     return
   fi
 
-  rm -rf "$OVERLAY_PROFILE_DIR"
-  install -d -m 0700 -o "$RETRO_RUN_USER" -g "$RETRO_RUN_USER" "$OVERLAY_PROFILE_DIR"
-  log "launching overlay url=$OVERLAY_URL"
+  log "launching native overlay bin=$OVERLAY_BIN"
 
-  run_as_arcade_user nice -n 10 "$CHROMIUM_BIN" \
-    --app="$OVERLAY_URL" \
-    --window-position="0,${overlay_top}" \
-    --window-size="${screen_width},${OVERLAY_HEIGHT}" \
-    --user-data-dir="$OVERLAY_PROFILE_DIR" \
-    --class=ArcadeRetroOverlay \
-    --no-first-run \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --disable-restore-session-state \
-    --disable-features=PaintHolding \
-    --disable-gpu \
-    --disable-gpu-rasterization \
-    --disable-gpu-compositing \
-    --ozone-platform=x11 \
-    --default-background-color=00000000 \
+  run_as_arcade_user nice -n 10 "$OVERLAY_BIN" \
+    --x 0 \
+    --y "$overlay_top" \
+    --width "$screen_width" \
+    --height "$OVERLAY_HEIGHT" \
+    --poll-ms "$OVERLAY_POLL_MS" \
+    --host "$OVERLAY_HOST" \
+    --port "$OVERLAY_PORT" \
+    --path "$OVERLAY_PATH" \
     >/tmp/arcade-retro-overlay.log 2>&1 &
 
   overlay_pid="$!"
@@ -173,8 +160,6 @@ launch_overlay() {
 }
 
 stop_overlay() {
-  pkill -u "$RETRO_RUN_USER" -f "$OVERLAY_PROFILE_DIR" >/dev/null 2>&1 || true
-
   if [[ -z "$overlay_pid" ]]; then
     log "overlay stop requested"
     return
@@ -246,25 +231,16 @@ print(f"{value / 1000:.3f}")
 PY
 }
 
-watch_overlay_visibility() {
-  local launched="0"
+launch_overlay_after_delay() {
   local delay_seconds
   delay_seconds="$(get_overlay_delay_seconds)"
 
   sleep "$delay_seconds"
 
   while [[ -n "$retroarch_pid" ]] && kill -0 "$retroarch_pid" >/dev/null 2>&1; do
-    if [[ "$launched" != "1" ]]; then
-      if [[ -z "$overlay_pid" ]] || ! kill -0 "$overlay_pid" >/dev/null 2>&1; then
-        launch_overlay
-        launched="1"
-      fi
-    fi
-
-    sleep 1
+    launch_overlay
+    return
   done
-
-  stop_overlay
 }
 
 retroarch_args=(--fullscreen --verbose)
@@ -289,8 +265,7 @@ retroarch_pid="$!"
 log "retroarch pid=$retroarch_pid"
 
 if [[ "$OVERLAY_ENABLE" != "0" ]]; then
-  watch_overlay_visibility &
-  overlay_watcher_pid="$!"
+  launch_overlay_after_delay &
 fi
 
 wait "$retroarch_pid"

@@ -15,6 +15,7 @@ SERVICE_DIR="$ROOT_DIR/apps/service"
 SERVICE_ENTRY="$SERVICE_DIR/input.js"
 SERVICE_BUNDLE="$SERVICE_DIR/input.bundle.cjs"
 UINPUT_HELPER_SOURCE="$SERVICE_DIR/uinput-helper.c"
+RETRO_OVERLAY_SOURCE="$SERVICE_DIR/arcade-retro-overlay.c"
 
 UI_PUBLIC_DIR="$ROOT_DIR/apps/ui/public"
 UI_VERSION_FILE="$UI_PUBLIC_DIR/arcade-shell-build.json"
@@ -97,6 +98,11 @@ if [[ ! -f "$UINPUT_HELPER_SOURCE" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$RETRO_OVERLAY_SOURCE" ]]; then
+  echo "[package-arcade-shell] missing overlay source: $RETRO_OVERLAY_SOURCE" >&2
+  exit 1
+fi
+
 if [[ ! -d "$OS_DIR" ]]; then
   echo "[package-arcade-shell] missing os payload: $OS_DIR" >&2
   exit 1
@@ -119,6 +125,7 @@ mkdir -p \
 rsync -a --delete "$UI_DIST_DIR/" "$RELEASE_UI_DIST_DIR/"
 install -m 0644 "$SERVICE_BUNDLE" "$RELEASE_SERVICE_DIR/input.bundle.cjs"
 install -m 0644 "$UINPUT_HELPER_SOURCE" "$RELEASE_BIN_DIR/uinput-helper.c"
+install -m 0644 "$RETRO_OVERLAY_SOURCE" "$RELEASE_BIN_DIR/arcade-retro-overlay.c"
 rsync -a --delete \
   --exclude '.DS_Store' \
   --exclude '.env.arcade-service' \
@@ -142,6 +149,7 @@ required_runtime_files=(
   "$RELEASE_UI_DIST_DIR/retro-overlay.html"
   "$RELEASE_SERVICE_DIR/input.bundle.cjs"
   "$RELEASE_BIN_DIR/uinput-helper.c"
+  "$RELEASE_BIN_DIR/arcade-retro-overlay.c"
   "$RELEASE_OS_DIR/.xinitrc"
   "$RELEASE_OS_DIR/bin/arcade-retro-launch.sh"
   "$RELEASE_OS_DIR/bin/arcade-retro-session.sh"
