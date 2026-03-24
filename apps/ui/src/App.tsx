@@ -8,7 +8,11 @@ import { SettingsModal } from './components/SettingsModal'
 import { ArcadeShellVersionBadge } from './components/ArcadeShellVersionBadge'
 
 import { exitGame, isGameRunning, launchGame } from './lib/gameLoader'
-import { fetchDeviceBalance, subscribeToDeviceBalance } from './lib/balance'
+import {
+  fetchDeviceBalance,
+  subscribeToDeviceBalance,
+  type DeviceBalanceSnapshot,
+} from './lib/balance'
 import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './lib/games'
 import { WithdrawModal } from './components/WithdrawModal'
 import { type ExitConfirmContext, ExitConfirmModal } from './components/ExitConfirmModal'
@@ -28,6 +32,7 @@ export type Game = {
   id: string
   name: string
   type: GameType
+  enabled?: boolean
   price: number
   art: string
   theme?: string
@@ -58,7 +63,7 @@ type ShellUpdateStatus = {
   message?: string
 }
 
-type DeviceAdminCommandType = 'restart' | 'shutdown'
+type DeviceAdminCommandType = 'restart' | 'shutdown' | 'reset'
 
 type DeviceAdminCommandRow = {
   id: number
@@ -96,7 +101,7 @@ function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
 
   if (!Number.isFinite(id) || id <= 0) return null
   if (!device_id) return null
-  if (command !== 'restart' && command !== 'shutdown') return null
+  if (command !== 'restart' && command !== 'shutdown' && command !== 'reset') return null
 
   return {
     id,
@@ -131,6 +136,9 @@ export default function App() {
   const [wifiSsid, setWifiSsid] = useState<string | null>(null)
   const [ethernetIp, setEthernetIp] = useState<string | null>(null)
   const [wifiIp, setWifiIp] = useState<string | null>(null)
+  const [ethernetName, setEthernetName] = useState<string | null>(null)
+  const [wifiName, setWifiName] = useState<string | null>(null)
+  const [shellVersion, setShellVersion] = useState<string>('')
 
   const [showWifiModal, setShowWifiModal] = useState(false)
   const [showSettingsModal, setShowSettingsModal] = useState(false)
@@ -142,11 +150,49 @@ export default function App() {
 
   const [initialized, setInitialized] = useState(false)
   const [balance, setBalance] = useState(0)
+  const lastAuthoritativeUpdatedAtRef = useRef(0)
+  const lastAuthoritativeRevisionRef = useRef(0)
+  const authoritativeBalanceRef = useRef(0)
+  const pendingBalanceDeltaRef = useRef(0)
+  const pendingMetricQueueRef = useRef<Array<{ revisionDelta: number; balanceDelta: number }>>([])
 
   const [games, setGames] = useState<Game[]>([])
 
+  const isSelectableGame = useCallback((game: Game | null | undefined) => {
+    if (!game) return false
+    return game.enabled !== false
+  }, [])
+
+  const canAffordGame = useCallback((game: Game | null | undefined, balanceValue: number) => {
+    if (!game) return false
+    if (game.type === 'casino') return true
+    return Math.max(0, Number(balanceValue ?? 0)) >= Math.max(0, Number(game.price ?? 0))
+  }, [])
+
+  const findFirstSelectableGameIndex = useCallback(
+    (list: Game[]) => list.findIndex(game => isSelectableGame(game)),
+    [isSelectableGame],
+  )
+
+  const findNextSelectableGameIndex = useCallback(
+    (list: Game[], startIndex: number, delta: number) => {
+      const nextIndex = startIndex + delta
+      if (nextIndex < 0 || nextIndex >= list.length) return startIndex
+
+      let index = nextIndex
+      while (index >= 0 && index < list.length) {
+        if (isSelectableGame(list[index])) return index
+        index += delta
+      }
+
+      return startIndex
+    },
+    [isSelectableGame],
+  )
+
   const selectedGame = games[focus] ?? null
   const hasLocalLink = wifiConnected || Boolean(ethernetIp)
+  const currentIp = ethernetIp?.trim() || wifiIp?.trim() || null
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -175,10 +221,17 @@ export default function App() {
       try {
         const res = await fetch(`${API_BASE}/network-info`)
         if (!res.ok) return
-        const data = (await res.json()) as { ethernet?: string | null; wifi?: string | null }
+        const data = (await res.json()) as {
+          ethernet?: string | null
+          wifi?: string | null
+          ethernet_name?: string | null
+          wifi_name?: string | null
+        }
         if (stopped) return
         setEthernetIp(data.ethernet ?? null)
         setWifiIp(data.wifi ?? null)
+        setEthernetName(data.ethernet_name ?? null)
+        setWifiName(data.wifi_name ?? null)
       } catch {
         // ignore transient network info failures
       }
@@ -193,10 +246,123 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+
+    fetch('/arcade-shell-build.json', { cache: 'no-store' })
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json() as Promise<{ version?: string }>
+      })
+      .then(data => {
+        if (cancelled) return
+        setShellVersion(String(data?.version || '').trim())
+      })
+      .catch(error => {
+        if (cancelled) return
+        console.error('[DEVICE] shell version fetch failed', error)
+        setShellVersion('')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const balanceRef = useRef(balance)
   useEffect(() => {
     balanceRef.current = balance
   }, [balance])
+
+  const setMergedBalance = useCallback((authoritativeBalance: number) => {
+    const merged = Math.max(0, authoritativeBalance + pendingBalanceDeltaRef.current)
+    setBalance(prev => (prev !== merged ? merged : prev))
+  }, [])
+
+  const resetPendingBalance = useCallback(() => {
+    pendingBalanceDeltaRef.current = 0
+    pendingMetricQueueRef.current = []
+  }, [])
+
+  const queuePendingBalanceDelta = useCallback(
+    (revisionDelta: number, balanceDelta: number) => {
+      const safeRevisionDelta = Number(revisionDelta ?? 0)
+      const safeBalanceDelta = Number(balanceDelta ?? 0)
+      if (!Number.isFinite(safeRevisionDelta) || safeRevisionDelta <= 0) return
+      if (!Number.isFinite(safeBalanceDelta)) return
+
+      pendingMetricQueueRef.current.push({
+        revisionDelta: safeRevisionDelta,
+        balanceDelta: safeBalanceDelta,
+      })
+      pendingBalanceDeltaRef.current += safeBalanceDelta
+      setMergedBalance(authoritativeBalanceRef.current)
+    },
+    [setMergedBalance],
+  )
+
+  const consumePendingRevision = useCallback((revisionDelta: number) => {
+    let remaining = Number(revisionDelta ?? 0)
+    if (!Number.isFinite(remaining) || remaining <= 0) return
+
+    const nextQueue: Array<{ revisionDelta: number; balanceDelta: number }> = []
+
+    for (const entry of pendingMetricQueueRef.current) {
+      if (remaining <= 0) {
+        nextQueue.push(entry)
+        continue
+      }
+
+      if (entry.revisionDelta <= remaining + 0.0001) {
+        pendingBalanceDeltaRef.current -= entry.balanceDelta
+        remaining -= entry.revisionDelta
+        continue
+      }
+
+      const consumedRatio = remaining / entry.revisionDelta
+      const consumedBalanceDelta = entry.balanceDelta * consumedRatio
+
+      pendingBalanceDeltaRef.current -= consumedBalanceDelta
+      nextQueue.push({
+        revisionDelta: entry.revisionDelta - remaining,
+        balanceDelta: entry.balanceDelta - consumedBalanceDelta,
+      })
+      remaining = 0
+    }
+
+    pendingMetricQueueRef.current = nextQueue
+  }, [])
+
+  const applyAuthoritativeBalance = useCallback((snapshot: DeviceBalanceSnapshot) => {
+    const nextBalance = Number(snapshot.balance ?? 0)
+    if (!Number.isFinite(nextBalance)) return
+
+    const updatedAtMs = snapshot.updatedAt ? Date.parse(snapshot.updatedAt) : NaN
+    const previousRevision = lastAuthoritativeRevisionRef.current
+    const nextRevision = Number(snapshot.revision ?? 0)
+    const normalizedRevision = Number.isFinite(nextRevision) ? nextRevision : 0
+
+    if (normalizedRevision < previousRevision) return
+    if (
+      normalizedRevision === previousRevision &&
+      Number.isFinite(updatedAtMs) &&
+      updatedAtMs < lastAuthoritativeUpdatedAtRef.current
+    ) {
+      return
+    }
+
+    if (Number.isFinite(updatedAtMs)) {
+      lastAuthoritativeUpdatedAtRef.current = updatedAtMs
+    }
+    lastAuthoritativeRevisionRef.current = normalizedRevision
+    authoritativeBalanceRef.current = nextBalance
+
+    if (normalizedRevision > previousRevision) {
+      consumePendingRevision(normalizedRevision - previousRevision)
+    }
+
+    setMergedBalance(nextBalance)
+  }, [consumePendingRevision, setMergedBalance])
 
   const wifiConnectedRef = useRef(wifiConnected)
   useEffect(() => {
@@ -264,7 +430,7 @@ export default function App() {
     runningGameRef.current = runningGame
   }, [runningGame])
 
-  const [withdrawAmount, setWithdrawAmount] = useState(60)
+  const [withdrawAmount, setWithdrawAmount] = useState(20)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [showExitConfirmModal, setShowExitConfirmModal] = useState(false)
@@ -301,11 +467,16 @@ export default function App() {
       setDeviceId(current => (current === id ? current : id))
 
       const [nextBalance, nextGames] = await Promise.all([
-        fetchDeviceBalance(id).catch(() => 0),
+        fetchDeviceBalance(id).catch(() => ({
+          balance: 0,
+          updatedAt: null,
+          revision: 0,
+        })),
         fetchCabinetGames(id).catch(() => [] as Game[]),
       ])
 
-      setBalance(nextBalance)
+      resetPendingBalance()
+      applyAuthoritativeBalance(nextBalance)
       setGames(nextGames)
       setInitialized(true)
       setNetworkStage('ok')
@@ -329,9 +500,12 @@ export default function App() {
       setLoading(false)
       recoveryInFlightRef.current = false
     }
-  }, [])
+  }, [applyAuthoritativeBalance, resetPendingBalance])
 
   const executeLocalPowerCommand = useCallback(async (command: DeviceAdminCommandType) => {
+    if (command === 'reset') {
+      throw new Error('reset is not a power command')
+    }
     const endpoint = command === 'restart' ? '/system/restart' : '/system/shutdown'
     const response = await fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
@@ -471,71 +645,6 @@ export default function App() {
     }
   }, [executeLocalPowerCommand, flashUiNotice, openNetworkSettings, selectedSettingsItem])
 
-  const processAdminCommand = useCallback(
-    async (command: DeviceAdminCommandRow) => {
-      if (adminCommandsInFlightRef.current.has(command.id)) return
-      adminCommandsInFlightRef.current.add(command.id)
-
-      try {
-        const processingAt = new Date().toISOString()
-        const { data: claimed, error: claimError } = await supabase
-          .from('device_admin_commands')
-          .update({
-            status: 'processing',
-            processed_at: processingAt,
-            updated_at: processingAt,
-            error: null,
-          })
-          .eq('id', command.id)
-          .eq('status', 'queued')
-          .select('id,device_id,command,status')
-          .maybeSingle()
-
-        if (claimError) throw claimError
-        if (!claimed) return
-
-        const claimedCommand = normalizeDeviceAdminCommand(claimed)
-        if (!claimedCommand) return
-
-        await executeLocalPowerCommand(claimedCommand.command)
-
-        const completedAt = new Date().toISOString()
-        const { error: completeError } = await supabase
-          .from('device_admin_commands')
-          .update({
-            status: 'completed',
-            completed_at: completedAt,
-            updated_at: completedAt,
-            result: {
-              ok: true,
-              handled_by: deviceIdRef.current,
-              completed_at: completedAt,
-            },
-          })
-          .eq('id', claimedCommand.id)
-          .eq('status', 'processing')
-        if (completeError) throw completeError
-      } catch (err) {
-        console.error('[ADMIN CMD] processing failed', err)
-        const failedAt = new Date().toISOString()
-        const failError = String((err as any)?.message ?? err ?? 'Unknown error')
-        await supabase
-          .from('device_admin_commands')
-          .update({
-            status: 'failed',
-            completed_at: failedAt,
-            updated_at: failedAt,
-            error: failError,
-          })
-          .eq('id', command.id)
-          .eq('status', 'processing')
-      } finally {
-        adminCommandsInFlightRef.current.delete(command.id)
-      }
-    },
-    [executeLocalPowerCommand],
-  )
-
   useEffect(() => {
     if (networkStage !== 'ok') return
     if (initialized) return
@@ -551,7 +660,7 @@ export default function App() {
 
         setDeviceId(id)
 
-        let initialBalance: number
+        let initialBalance: DeviceBalanceSnapshot
         try {
           initialBalance = await fetchDeviceBalance(id)
         } catch (err) {
@@ -562,10 +671,11 @@ export default function App() {
         }
         if (cancelled) return
 
-        setBalance(initialBalance)
+        resetPendingBalance()
+        applyAuthoritativeBalance(initialBalance)
 
-        unsubscribe = subscribeToDeviceBalance(id, newBalance => {
-          setBalance(prev => (prev !== newBalance ? newBalance : prev))
+        unsubscribe = subscribeToDeviceBalance(id, snapshot => {
+          applyAuthoritativeBalance(snapshot)
         })
 
         setInitialized(true)
@@ -588,7 +698,7 @@ export default function App() {
       cancelled = true
       if (unsubscribe) unsubscribe()
     }
-  }, [networkStage])
+  }, [applyAuthoritativeBalance, networkStage, resetPendingBalance])
 
   useEffect(() => {
     if (networkStage !== 'ok' || !initialized) {
@@ -691,7 +801,7 @@ export default function App() {
 
     // 1️⃣ Hard refresh balance
     fetchDeviceBalance(deviceId)
-      .then(setBalance)
+      .then(applyAuthoritativeBalance)
       .catch(err => {
         if (isMissingDeviceRowError(err)) {
           void recoverDeviceState('network-recovery-missing-device')
@@ -707,6 +817,37 @@ export default function App() {
   useEffect(() => {
     deviceIdRef.current = deviceId
   }, [deviceId])
+
+  const runtimeInfoSyncKeyRef = useRef('')
+  useEffect(() => {
+    if (!deviceId) return
+
+    const payload = {
+      device_id: deviceId,
+      arcade_shell_version: shellVersion || null,
+      current_ip: currentIp,
+    }
+    const syncKey = JSON.stringify(payload)
+    if (runtimeInfoSyncKeyRef.current === syncKey) return
+
+    let cancelled = false
+
+    supabase
+      .from('devices')
+      .upsert(payload, { onConflict: 'device_id' })
+      .then(({ error }) => {
+        if (cancelled) return
+        if (error) {
+          console.error('[DEVICE] runtime info sync failed', error)
+          return
+        }
+        runtimeInfoSyncKeyRef.current = syncKey
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [currentIp, deviceId, shellVersion])
 
   useEffect(() => {
     if (!deviceId) return
@@ -724,18 +865,27 @@ export default function App() {
       }
 
       setFocus(prev => {
+        const firstSelectable = findFirstSelectableGameIndex(list)
+        if (firstSelectable < 0) return 0
         if (prev >= list.length) {
-          return Math.max(0, list.length - 1)
+          return firstSelectable
         }
+        if (!isSelectableGame(list[prev])) return firstSelectable
         return prev
       })
     }
 
     load()
 
-    const unsubGames = subscribeToGames(deviceId, load, disabledGameId => {
+    const unsubGames = subscribeToGames(deviceId, load, disabledGame => {
       const current = runningGameRef.current
-      if (current?.id === disabledGameId) {
+      if (current?.id === disabledGame.id) {
+        if (current.type === 'casino' || disabledGame.type === 'casino') {
+          window.setTimeout(() => {
+            handleExitGame()
+          }, EXIT_CONFIRM_WINDOW_MS)
+          return
+        }
         handleExitGame()
       }
     })
@@ -746,7 +896,7 @@ export default function App() {
       unsubGames()
       unsubCabinet()
     }
-  }, [deviceId, runningGame])
+  }, [deviceId, findFirstSelectableGameIndex, isSelectableGame, runningGame])
 
   useEffect(() => {
     if (!deviceId) return
@@ -768,7 +918,7 @@ export default function App() {
 
         if (cancelled) return
 
-        setBalance(nextBalance)
+        applyAuthoritativeBalance(nextBalance)
         setGames(nextGames)
 
         const current = runningGameRef.current
@@ -777,9 +927,12 @@ export default function App() {
         }
 
         setFocus(prev => {
+          const firstSelectable = findFirstSelectableGameIndex(nextGames)
+          if (firstSelectable < 0) return 0
           if (prev >= nextGames.length) {
-            return Math.max(0, nextGames.length - 1)
+            return firstSelectable
           }
+          if (!isSelectableGame(nextGames[prev])) return firstSelectable
           return prev
         })
       } catch (err) {
@@ -820,7 +973,15 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisibility)
       window.clearInterval(interval)
     }
-  }, [deviceId, initialized, networkStage, recoverDeviceState])
+  }, [
+    applyAuthoritativeBalance,
+    deviceId,
+    findFirstSelectableGameIndex,
+    initialized,
+    isSelectableGame,
+    networkStage,
+    recoverDeviceState,
+  ])
 
   useEffect(() => {
     if (!deviceId) return
@@ -846,6 +1007,233 @@ export default function App() {
       void supabase.removeChannel(channel)
     }
   }, [deviceId, initialized, recoverDeviceState])
+
+  useEffect(() => {
+    if (!initialized) return
+    if (networkStage !== 'ok') return
+
+    const timer = window.setTimeout(() => {
+      console.log('[UI BALANCE PUSH]', balance)
+
+      fetch(`${API_BASE}/arcade-life/balance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ balance }),
+      }).catch(err => {
+        console.error('[UI BALANCE PUSH] failed', err)
+      })
+    }, 80)
+
+    return () => window.clearTimeout(timer)
+  }, [balance, initialized, networkStage])
+
+  const addBalance = (source = 'coin', amount = 5) => {
+    const id = deviceIdRef.current
+    if (!id) return
+
+    queuePendingBalanceDelta(amount, amount)
+    queueMetricEvent(id, 'coins_in', amount)
+  }
+
+  const minusBalance = (source = 'hopper', amount = 20) => {
+    const id = deviceIdRef.current
+    if (!id) return
+
+    if (source === 'hopper') {
+      queuePendingBalanceDelta(amount, -amount)
+      queueMetricEvent(id, 'withdrawal', amount)
+    }
+  }
+
+  const addHopperBalance = (amount = 20) => {
+    const id = deviceIdRef.current
+    if (!id) return
+    queuePendingBalanceDelta(amount, 0)
+    queueMetricEvent(id, 'hopper_in', amount)
+  }
+
+  const recordBet = (amount = 0) => {
+    const id = deviceIdRef.current
+    if (!id || amount <= 0) return
+    queuePendingBalanceDelta(amount, -amount)
+    queueMetricEvent(id, 'bet', amount)
+  }
+
+  const recordWin = (amount = 0) => {
+    const id = deviceIdRef.current
+    if (!id || amount <= 0) return
+    queuePendingBalanceDelta(amount, amount)
+    queueMetricEvent(id, 'win', amount)
+  }
+
+  const STEP = 20
+  const MIN = 20
+  const getMaxSelectable = (balance: number) => {
+    return Math.floor(balance / STEP) * STEP
+  }
+  const isValidWithdrawAmount = (amount: number, balanceValue: number) => {
+    if (!Number.isFinite(amount)) return false
+    const max = getMaxSelectable(balanceValue)
+    return amount >= MIN && amount <= max && amount % STEP === 0
+  }
+  const maxSelectable = getMaxSelectable(balance)
+  const isWithdrawDisabled = maxSelectable < MIN
+
+  const addWithdrawAmount = () => {
+    if (isWithdrawDisabled) return
+    setWithdrawAmount(prev => {
+      const max = getMaxSelectable(balance)
+      return Math.min(prev + STEP, max)
+    })
+  }
+
+  const minusWithdrawAmount = () => {
+    if (isWithdrawDisabled) return
+    setWithdrawAmount(prev => {
+      return Math.max(MIN, prev - STEP)
+    })
+  }
+
+  useEffect(() => {
+    if (!showWithdrawModal) return
+    if (isWithdrawDisabled) return
+    const max = getMaxSelectable(balance)
+    setWithdrawAmount(prev => {
+      const normalized = Math.floor(prev / STEP) * STEP
+      const withMin = Math.max(MIN, normalized)
+      return Math.min(withMin, max)
+    })
+  }, [showWithdrawModal, isWithdrawDisabled, balance])
+
+  const submitWithdraw = useCallback(() => {
+    if (!hasLocalLinkRef.current) {
+      flashUiNotice('OFFLINE')
+      return
+    }
+    if (isWithdrawing || !isValidWithdrawAmount(withdrawAmount, balance)) return
+    fetch(API_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'WITHDRAW',
+        amount: withdrawAmount,
+      }),
+    })
+    setIsWithdrawing(true)
+  }, [balance, flashUiNotice, isWithdrawing, withdrawAmount])
+
+  const clearExitConfirmTimer = useCallback(() => {
+    if (exitConfirmTimerRef.current !== null) {
+      window.clearTimeout(exitConfirmTimerRef.current)
+      exitConfirmTimerRef.current = null
+    }
+  }, [])
+
+  const closeExitConfirm = useCallback(() => {
+    clearExitConfirmTimer()
+    exitConfirmDeadlineRef.current = 0
+    setShowExitConfirmModal(false)
+    setExitConfirmContext(null)
+  }, [clearExitConfirmTimer])
+
+  const executeLocalRuntimeReset = useCallback(async () => {
+    closeSettingsModal()
+    setShowWithdrawModal(false)
+    setCasinoLaunchError(null)
+    closeExitConfirm()
+    setTransitionOverlay({
+      visible: true,
+      label: 'Resetting Demo...',
+      detail: 'Returning to main menu',
+    })
+
+    const current = runningGameRef.current
+    if (current) {
+      if (current.type === 'casino') {
+        await new Promise(resolve => window.setTimeout(resolve, EXIT_CONFIRM_WINDOW_MS))
+      }
+
+      handleExitGame()
+      await new Promise(resolve => window.setTimeout(resolve, current.type === 'casino' ? 350 : 150))
+    }
+
+    preparedCasinoVersionRef.current = {}
+    await recoverDeviceState('device-admin-reset')
+    setTransitionOverlay({
+      visible: false,
+      label: 'Loading Game...',
+      detail: null,
+    })
+  }, [closeExitConfirm, closeSettingsModal, recoverDeviceState])
+
+  const processAdminCommand = useCallback(
+    async (command: DeviceAdminCommandRow) => {
+      if (adminCommandsInFlightRef.current.has(command.id)) return
+      adminCommandsInFlightRef.current.add(command.id)
+
+      try {
+        const processingAt = new Date().toISOString()
+        const { data: claimed, error: claimError } = await supabase
+          .from('device_admin_commands')
+          .update({
+            status: 'processing',
+            processed_at: processingAt,
+            updated_at: processingAt,
+            error: null,
+          })
+          .eq('id', command.id)
+          .eq('status', 'queued')
+          .select('id,device_id,command,status')
+          .maybeSingle()
+
+        if (claimError) throw claimError
+        if (!claimed) return
+
+        const claimedCommand = normalizeDeviceAdminCommand(claimed)
+        if (!claimedCommand) return
+
+        if (claimedCommand.command === 'reset') {
+          await executeLocalRuntimeReset()
+        } else {
+          await executeLocalPowerCommand(claimedCommand.command)
+        }
+
+        const completedAt = new Date().toISOString()
+        const { error: completeError } = await supabase
+          .from('device_admin_commands')
+          .update({
+            status: 'completed',
+            completed_at: completedAt,
+            updated_at: completedAt,
+            result: {
+              ok: true,
+              handled_by: deviceIdRef.current,
+              completed_at: completedAt,
+            },
+          })
+          .eq('id', claimedCommand.id)
+          .eq('status', 'processing')
+        if (completeError) throw completeError
+      } catch (err) {
+        console.error('[ADMIN CMD] processing failed', err)
+        const failedAt = new Date().toISOString()
+        const failError = String((err as any)?.message ?? err ?? 'Unknown error')
+        await supabase
+          .from('device_admin_commands')
+          .update({
+            status: 'failed',
+            completed_at: failedAt,
+            updated_at: failedAt,
+            error: failError,
+          })
+          .eq('id', command.id)
+          .eq('status', 'processing')
+      } finally {
+        adminCommandsInFlightRef.current.delete(command.id)
+      }
+    },
+    [executeLocalPowerCommand, executeLocalRuntimeReset],
+  )
 
   useEffect(() => {
     if (!deviceId) return
@@ -901,116 +1289,6 @@ export default function App() {
       void supabase.removeChannel(channel)
     }
   }, [deviceId, initialized, processAdminCommand])
-
-  useEffect(() => {
-    if (!initialized) return
-    if (networkStage !== 'ok') return
-
-    const timer = window.setTimeout(() => {
-      console.log('[UI BALANCE PUSH]', balance)
-
-      fetch(`${API_BASE}/arcade-life/balance`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ balance }),
-      }).catch(err => {
-        console.error('[UI BALANCE PUSH] failed', err)
-      })
-    }, 80)
-
-    return () => window.clearTimeout(timer)
-  }, [balance, initialized, networkStage])
-
-  const addBalance = (source = 'coin', amount = 5) => {
-    const id = deviceIdRef.current
-    if (!id) return
-
-    setBalance(prev => prev + amount)
-    queueMetricEvent(id, 'coins_in', amount)
-  }
-
-  const minusBalance = (source = 'hopper', amount = 20) => {
-    const id = deviceIdRef.current
-    if (!id) return
-
-    setBalance(prev => prev - amount)
-    if (source === 'hopper') {
-      queueMetricEvent(id, 'withdrawal', amount)
-    }
-  }
-
-  const addHopperBalance = (amount = 20) => {
-    const id = deviceIdRef.current
-    if (!id) return
-    queueMetricEvent(id, 'hopper_in', amount)
-  }
-
-  const recordBet = (amount = 0) => {
-    const id = deviceIdRef.current
-    if (!id || amount <= 0) return
-    setBalance(prev => prev - amount)
-    queueMetricEvent(id, 'bet', amount)
-  }
-
-  const recordWin = (amount = 0) => {
-    const id = deviceIdRef.current
-    if (!id || amount <= 0) return
-    setBalance(prev => prev + amount)
-    queueMetricEvent(id, 'win', amount)
-  }
-
-  const STEP = 20
-  const MIN = 60
-  const getMaxSelectable = (balance: number) => {
-    return Math.floor(balance / STEP) * STEP
-  }
-  const isValidWithdrawAmount = (amount: number, balanceValue: number) => {
-    if (!Number.isFinite(amount)) return false
-    const max = getMaxSelectable(balanceValue)
-    return amount >= MIN && amount <= max && amount % STEP === 0
-  }
-  const maxSelectable = getMaxSelectable(balance)
-  const isWithdrawDisabled = maxSelectable < MIN
-
-  const addWithdrawAmount = () => {
-    if (isWithdrawDisabled) return
-    setWithdrawAmount(prev => {
-      const max = getMaxSelectable(balance)
-      return Math.min(prev + STEP, max)
-    })
-  }
-
-  const minusWithdrawAmount = () => {
-    if (isWithdrawDisabled) return
-    setWithdrawAmount(prev => {
-      return Math.max(MIN, prev - STEP)
-    })
-  }
-
-  useEffect(() => {
-    if (!showWithdrawModal) return
-    if (isWithdrawDisabled) return
-    const max = getMaxSelectable(balance)
-    setWithdrawAmount(prev => {
-      const normalized = Math.floor(prev / STEP) * STEP
-      const withMin = Math.max(MIN, normalized)
-      return Math.min(withMin, max)
-    })
-  }, [showWithdrawModal, isWithdrawDisabled, balance])
-
-  const clearExitConfirmTimer = useCallback(() => {
-    if (exitConfirmTimerRef.current !== null) {
-      window.clearTimeout(exitConfirmTimerRef.current)
-      exitConfirmTimerRef.current = null
-    }
-  }, [])
-
-  const closeExitConfirm = useCallback(() => {
-    clearExitConfirmTimer()
-    exitConfirmDeadlineRef.current = 0
-    setShowExitConfirmModal(false)
-    setExitConfirmContext(null)
-  }, [clearExitConfirmTimer])
 
   const confirmExit = useCallback(() => {
     closeExitConfirm()
@@ -1097,6 +1375,7 @@ export default function App() {
 
   const addWithdrawAmountRef = useRef(addWithdrawAmount)
   const minusWithdrawAmountRef = useRef(minusWithdrawAmount)
+  const submitWithdrawRef = useRef(submitWithdraw)
   const setShowWithdrawModalRef = useRef(setShowWithdrawModal)
   const setIsWithdrawingRef = useRef(setIsWithdrawing)
   const requestExitConfirmRef = useRef(requestExitConfirm)
@@ -1114,6 +1393,7 @@ export default function App() {
     setIsWithdrawingRef.current = setIsWithdrawing
     addWithdrawAmountRef.current = addWithdrawAmount
     minusWithdrawAmountRef.current = minusWithdrawAmount
+    submitWithdrawRef.current = submitWithdraw
     requestExitConfirmRef.current = requestExitConfirm
     confirmExitRef.current = confirmExit
     closeExitConfirmRef.current = closeExitConfirm
@@ -1296,7 +1576,7 @@ export default function App() {
 
         if (deviceIdRef.current) {
           fetchDeviceBalance(deviceIdRef.current)
-            .then(setBalance)
+            .then(applyAuthoritativeBalance)
             .catch(() => {})
           fetchCabinetGames(deviceIdRef.current)
             .then(setGames)
@@ -1407,6 +1687,22 @@ export default function App() {
 
         if (button === 6 && s.showWithdrawModal && !s.isWithdrawing) {
           setShowWithdrawModalRef.current(false)
+          return
+        }
+
+        if (s.showWithdrawModal && !s.isWithdrawing) {
+          if (button === 'LEFT' || button === 'DOWN') {
+            minusWithdrawAmountRef.current()
+            return
+          }
+          if (button === 'RIGHT' || button === 'UP') {
+            addWithdrawAmountRef.current()
+            return
+          }
+          if (button === 7 || button === 0 || button === 1) {
+            submitWithdrawRef.current()
+            return
+          }
         }
         // ----------------------------
         // MENU INPUT
@@ -1462,14 +1758,14 @@ export default function App() {
 
           case 'BET_UP': {
             if (s.showWithdrawModal) {
-              addWithdrawAmountRef.current()
+              minusWithdrawAmountRef.current()
             }
             break
           }
 
           case 'BET_DOWN': {
             if (s.showWithdrawModal) {
-              minusWithdrawAmountRef.current()
+              addWithdrawAmountRef.current()
             }
             break
           }
@@ -1483,16 +1779,7 @@ export default function App() {
               if (getMaxSelectable(s.balance) < MIN) break
               setShowWithdrawModalRef.current(true)
             } else if (!s.isWithdrawing && isValidWithdrawAmount(s.withdrawAmount, s.balance)) {
-              fetch(API_BASE, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  type: 'WITHDRAW',
-                  amount: s.withdrawAmount,
-                }),
-              })
-
-              setIsWithdrawingRef.current(true)
+              submitWithdrawRef.current()
             }
             break
           }
@@ -1561,8 +1848,15 @@ export default function App() {
           selectedGame: selectedGameRef.current,
           focus: focusRef.current,
         })
-        if (selectedGameRef.current) {
+        if (
+          isSelectableGame(selectedGameRef.current) &&
+          canAffordGame(selectedGameRef.current, balanceRef.current)
+        ) {
           void launch(selectedGameRef.current)
+          return
+        }
+        if (selectedGameRef.current?.type === 'arcade') {
+          flashUiNotice('INSUFFICIENT BALANCE')
         }
         break
       }
@@ -1591,21 +1885,20 @@ export default function App() {
     setSettingsFocused(false)
     setFocus(prev => {
       const currentGames = gamesRef.current
-      const nextIndex = prev + delta
-
-      if (nextIndex < 0) return prev
-      if (nextIndex >= currentGames.length) return prev
-
-      return nextIndex
+      return findNextSelectableGameIndex(currentGames, prev, delta)
     })
   }
 
   useEffect(() => {
     setFocus(prev => {
       if (games.length === 0) return 0
-      return Math.min(prev, games.length - 1)
+      const firstSelectable = findFirstSelectableGameIndex(games)
+      if (firstSelectable < 0) return 0
+      if (prev >= games.length) return firstSelectable
+      if (!isSelectableGame(games[prev])) return firstSelectable
+      return prev
     })
-  }, [games.length])
+  }, [findFirstSelectableGameIndex, games, isSelectableGame])
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -1654,7 +1947,13 @@ export default function App() {
             openSettingsModal()
             return
           }
-          if (!selectedGame) return
+          if (!isSelectableGame(selectedGame)) return
+          if (!canAffordGame(selectedGame, balanceRef.current)) {
+            if (selectedGame?.type === 'arcade') {
+              flashUiNotice('INSUFFICIENT BALANCE')
+            }
+            return
+          }
           launch(selectedGame)
           break
       }
@@ -1668,6 +1967,9 @@ export default function App() {
     openSettingsModal,
     requestExitConfirm,
     runningCasino,
+    canAffordGame,
+    flashUiNotice,
+    isSelectableGame,
     selectedGame,
     settingsFocused,
     showSettingsModal,
@@ -1696,6 +1998,16 @@ export default function App() {
         runningGame: runningGameRef.current,
         runningCasino,
       })
+      return
+    }
+
+    if (game.type === 'arcade' && !canAffordGame(game, balanceRef.current)) {
+      console.warn('[LAUNCH] aborted: insufficient balance', {
+        id: game.id,
+        balance: balanceRef.current,
+        price: game.price,
+      })
+      flashUiNotice('INSUFFICIENT BALANCE')
       return
     }
 
@@ -1832,6 +2144,9 @@ export default function App() {
           status: response.status,
           error: errorText,
         })
+        if (response.status === 402) {
+          flashUiNotice('INSUFFICIENT BALANCE')
+        }
         setTransitionOverlay({
           visible: false,
           label: 'Loading Game...',
@@ -2042,6 +2357,8 @@ export default function App() {
           }}
           wifiConnected={wifiConnected}
           currentSsid={wifiSsid}
+          currentIp={ethernetIp ?? wifiIp}
+          ethernetName={ethernetName ?? wifiName}
         />
       )}
       {showSettingsModal && (
@@ -2079,22 +2396,7 @@ export default function App() {
           onAddAmount={addWithdrawAmount}
           onMinusAmount={minusWithdrawAmount}
           onCancel={() => setShowWithdrawModal(false)}
-          onConfirm={() => {
-            if (!hasLocalLinkRef.current) {
-              flashUiNotice('OFFLINE')
-              return
-            }
-            if (!isValidWithdrawAmount(withdrawAmount, balance)) return
-            fetch(API_BASE, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                type: 'WITHDRAW',
-                amount: withdrawAmount,
-              }),
-            })
-            setIsWithdrawing(true)
-          }}
+          onConfirm={submitWithdraw}
         />
       )}
       {showExitConfirmModal && (
@@ -2114,7 +2416,8 @@ export default function App() {
             <div className="top-status-network">
               <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
               <span className="top-status-ssid">
-                {wifiSsid?.trim() || (wifiConnected ? 'CONNECTED' : ethernetIp ? 'ETHERNET' : 'OFFLINE')}
+                {wifiSsid?.trim() ||
+                  (wifiConnected ? 'Connected' : ethernetName || 'Offline')}
               </span>
             </div>
             <div>{formatDateTime(now)}</div>
@@ -2165,7 +2468,7 @@ export default function App() {
             <div className="balance-display">
               Balance <span className="balance-amount">{formatPeso(balance ?? 0)}</span>
             </div>
-            <ArcadeShellVersionBadge deviceId={deviceId} ethernetIp={ethernetIp} wifiIp={wifiIp} />
+            <ArcadeShellVersionBadge deviceId={deviceId} />
           </div>
         </>
       )}

@@ -16,6 +16,11 @@ RETROARCH_LOG=${RETROARCH_LOG:-$LOG_DIR/retroarch.log}
 RETROARCH_STUCK_CPU_THRESHOLD=${RETROARCH_STUCK_CPU_THRESHOLD:-0.5}
 RETROARCH_STUCK_CYCLES=${RETROARCH_STUCK_CYCLES:-6}
 
+INPUT_SERVICE_NAME=${INPUT_SERVICE_NAME:-arcade-input.service}
+INPUT_HEALTH_URL=${INPUT_HEALTH_URL:-http://127.0.0.1:5174/device-id}
+INPUT_HEALTH_TIMEOUT=${INPUT_HEALTH_TIMEOUT:-3}
+INPUT_FAILURE_RESTART_THRESHOLD=${INPUT_FAILURE_RESTART_THRESHOLD:-2}
+
 NETWORK_CHECK_HOST=${NETWORK_CHECK_HOST:-1.1.1.1}
 NETWORK_CHECK_TIMEOUT=${NETWORK_CHECK_TIMEOUT:-5}
 NETWORK_FAILURE_RESTART_THRESHOLD=${NETWORK_FAILURE_RESTART_THRESHOLD:-3}
@@ -35,6 +40,7 @@ mkdir -p "$LOG_DIR"
 trap 'log CRITICAL "triggered exit ($?)"' EXIT
 
 retroarch_stuck_counter=0
+input_failures=0
 network_failures=0
 disk_failure_count=0
 smart_failure_count=0
@@ -88,6 +94,57 @@ start_background() {
 
 start_retroarch() {
   start_background "retroarch" "$RETROARCH_CMD" "$RETROARCH_LOG"
+}
+
+restart_managed_service() {
+  local service_name=$1
+  if [[ -z "$service_name" ]]; then
+    return
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log WARN "Service" "systemctl unavailable; cannot restart $service_name"
+    return
+  fi
+
+  log WARN "Service" "restarting $service_name"
+  systemctl restart "$service_name" >/dev/null 2>&1 || true
+}
+
+monitor_input_service() {
+  local service_name=$INPUT_SERVICE_NAME
+  local health_url=$INPUT_HEALTH_URL
+  local timeout_seconds=$INPUT_HEALTH_TIMEOUT
+
+  if [[ -n "$service_name" ]] && command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet "$service_name"; then
+      log WARN "Input" "$service_name inactive, restarting"
+      restart_managed_service "$service_name"
+      input_failures=0
+      return
+    fi
+  fi
+
+  if [[ -z "$health_url" ]]; then
+    input_failures=0
+    return
+  fi
+
+  if curl -fsS --max-time "$timeout_seconds" "$health_url" >/dev/null 2>&1; then
+    if ((input_failures > 0)); then
+      log INFO "Input" "health probe restored"
+    fi
+    input_failures=0
+    return
+  fi
+
+  ((input_failures++))
+  log WARN "Input" "health probe failed ($input_failures/$INPUT_FAILURE_RESTART_THRESHOLD): $health_url"
+
+  if ((input_failures >= INPUT_FAILURE_RESTART_THRESHOLD)); then
+    restart_managed_service "$service_name"
+    input_failures=0
+  fi
 }
 
 monitor_chromium() {
@@ -232,6 +289,7 @@ check_disk() {
 main_loop() {
   notify_systemd_ready
   while true; do
+    monitor_input_service
     monitor_chromium
     monitor_retroarch
     check_network

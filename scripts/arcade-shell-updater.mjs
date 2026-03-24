@@ -800,7 +800,8 @@ async function main() {
   )
   const rebootOnUpdate = String(process.env.ARCADE_SHELL_REBOOT_ON_UPDATE || '0') === '1'
   const serviceNames = String(
-    process.env.ARCADE_SHELL_SERVICES || 'arcade-input.service,arcade-ui.service',
+    process.env.ARCADE_SHELL_SERVICES ||
+      'arcade-input.service,arcade-ui.service,arcade-watchdog.service',
   )
     .split(',')
     .map(value => value.trim())

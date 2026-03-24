@@ -16,25 +16,32 @@ function resolveGameArt(boxArtUrl: unknown) {
   return raw
 }
 
-export async function fetchCabinetGames(deviceId: string) {
-  const normalizeGames = (data: any[]) =>
-    (data ?? [])
-      .map((row: any) => row.games ?? row)
-      .filter(Boolean)
-      .map((g: any) => ({
-        id: g.id,
-        name: g.name,
-        type: g.type,
-        price: g.price,
-        join_mode: g.join_mode,
-        art: resolveGameArt(g.box_art_url ?? g.art),
-        emulator_core: g.emulator_core,
-        rom_path: g.rom_path,
-        package_url: g.package_url,
-        version: g.version,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name))
+function normalizeGames(data: any[]) {
+  return (data ?? [])
+    .map((row: any) => row.games ?? row)
+    .filter(Boolean)
+    .map((g: any) => ({
+      id: g.id,
+      name: g.name,
+      type: g.type,
+      enabled: g.enabled !== false,
+      price: g.price,
+      join_mode: g.join_mode,
+      art: resolveGameArt(g.box_art_url ?? g.art),
+      emulator_core: g.emulator_core,
+      rom_path: g.rom_path,
+      package_url: g.package_url,
+      version: g.version,
+    }))
+    .filter((g: any) => g.type !== 'casino' || g.enabled !== false)
+    .sort((a, b) => {
+      const enabledDelta = Number(b.enabled !== false) - Number(a.enabled !== false)
+      if (enabledDelta !== 0) return enabledDelta
+      return a.name.localeCompare(b.name)
+    })
+}
 
+export async function fetchCabinetGames(deviceId: string) {
   try {
     const { data, error } = await supabase
       .from('cabinet_games')
@@ -59,7 +66,6 @@ export async function fetchCabinetGames(deviceId: string) {
       )
       .eq('device_id', deviceId)
       .eq('installed', true)
-      .eq('games.enabled', true)
 
     if (error) throw error
 
@@ -79,7 +85,7 @@ export async function fetchCabinetGames(deviceId: string) {
 export function subscribeToGames(
   deviceId: string,
   onChange: () => void,
-  onDisable?: (gameId: string) => void,
+  onDisable?: (game: { id: string; type: string }) => void,
 ) {
   let disposed = false
   let reconnectTimer: number | null = null
@@ -113,7 +119,10 @@ export function subscribeToGames(
         if (!relevant) return
 
         if (newRow.enabled === false && onDisable) {
-          onDisable(newRow.id)
+          onDisable({
+            id: String(newRow.id || ''),
+            type: String(newRow.type || ''),
+          })
         }
 
         onChange()

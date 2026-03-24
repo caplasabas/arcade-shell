@@ -42,11 +42,13 @@ export function GameGrid({ balance, games, focusedIndex, hasOverflow }: Props) {
     >
       <div className="grid" ref={gridRef}>
         {games.map((g, i) => {
+          const launchBlockedByBalance = g.type === 'arcade' && balance < g.price
           return (
             <GameTile
               key={g.id}
               game={g}
-              disabled={balance < g.price}
+              disabled={launchBlockedByBalance}
+              adminDisabled={g.enabled === false}
               focused={i === focusedIndex}
             />
           )

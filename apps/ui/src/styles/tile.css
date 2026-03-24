@@ -26,6 +26,27 @@
     opacity: 0.65;
 }
 
+.tile.admin-disabled {
+    opacity: 0.42;
+    filter: grayscale(1) saturate(0.35) brightness(0.75);
+}
+
+.tile.admin-disabled .title-band {
+    background: linear-gradient(
+            to top,
+            rgba(84, 84, 84, 0.78),
+            rgba(112, 112, 112, 0.94)
+    );
+}
+
+.tile.admin-disabled .label {
+    color: rgba(255, 245, 220, 0.92);
+}
+
+.tile.admin-disabled .tile-price-badge {
+    right: auto;
+    left: 12px;
+}
 
 .tile.focused {
     transform: scale(1.06);
@@ -46,6 +67,13 @@
     /*box-shadow: 0 6px 40px rgba(255, 211, 136, 0.45);*/
     opacity: 0.65;
     filter: none;
+}
+
+.tile.admin-disabled.tile.focused {
+    border: 3px solid rgba(140, 140, 140, 0.55);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+    opacity: 0.42;
+    filter: grayscale(1) saturate(0.35) brightness(0.75);
 }
 
 
@@ -101,6 +129,57 @@
     font-weight: 700;
     letter-spacing: 0.4px;
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.tile-status-badge {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(18, 18, 18, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: rgba(255, 245, 220, 0.92);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.tile-price-badge {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    max-width: calc(100% - 24px);
+    padding: 5px 10px 4px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(10, 10, 10, 0.82);
+    color: rgba(255, 244, 214, 0.98);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+    white-space: nowrap;
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+    pointer-events: none;
+}
+
+.tile-price-badge.arcade {
+    background: linear-gradient(180deg, rgba(192, 45, 45, 0.96), rgba(136, 18, 18, 0.92));
+}
+
+.tile-price-badge.arcade.disabled {
+    background: linear-gradient(180deg, rgba(110, 110, 110, 0.9), rgba(72, 72, 72, 0.9));
+}
+
+.tile-price-badge.casino {
+    background: linear-gradient(180deg, rgba(31, 130, 79, 0.96), rgba(15, 96, 56, 0.92));
 }
 
 .focus-ring {

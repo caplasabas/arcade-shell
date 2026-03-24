@@ -42,6 +42,8 @@ export function WithdrawModal({
             </div>
           </div>
 
+          <div className="modal-warning">Min withdrawable amount is 20</div>
+
           {!canAfford && <div className="modal-warning">Insufficient balance</div>}
         </div>
         <div className="modal-actions">

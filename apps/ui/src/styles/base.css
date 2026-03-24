@@ -598,8 +598,9 @@ button:focus-visible {
 .settings-label,
 .settings-value {
     font-family: 'Bebas Neue', sans-serif;
-    font-size: 28px;
+    font-size: 24px;
     letter-spacing: 0.05em;
+    text-transform: capitalize;
 }
 
 .settings-value {
@@ -638,15 +639,95 @@ button:focus-visible {
 .settings-hint {
     margin-top: 18px;
     color: #f2ddb0;
-    font-size: 18px;
+    font-size: 16px;
     letter-spacing: 0.06em;
 }
 
 .settings-footer {
     margin-top: 10px;
     color: #b7b19e;
-    font-size: 15px;
+    font-size: 13px;
     letter-spacing: 0.08em;
+    text-transform: capitalize;
+}
+
+.modal-network-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    color: #bfb7a1;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+}
+
+.network-sections {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin-top: 16px;
+}
+
+.network-section {
+    border: 1px solid #4d4738;
+    border-radius: 6px;
+    background: rgba(18, 17, 15, 0.92);
+    padding: 12px;
+}
+
+.network-section.active {
+    border-color: #ffd84d;
+    box-shadow: 0 0 0 1px rgba(255, 216, 77, 0.15);
+}
+
+.network-section-title {
+    margin-bottom: 10px;
+    color: #f2ddb0;
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 22px;
+    letter-spacing: 0.05em;
+    text-transform: capitalize;
+}
+
+.network-scroll-list {
+    max-height: 180px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-right: 4px;
+}
+
+.network-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 46px;
+    padding: 0 14px;
+    border: 1px solid #5c5541;
+    border-radius: 5px;
+    background: #131210;
+    color: #ece2c7;
+    text-transform: capitalize;
+}
+
+.network-item.active {
+    border-color: #ffd84d;
+    background: #2b2515;
+    color: #ffd84d;
+    box-shadow: inset 0 0 0 1px rgba(255, 216, 77, 0.18);
+}
+
+.network-item-meta {
+    color: rgba(236, 226, 199, 0.72);
+    font-size: 12px;
+}
+
+.modal-network-empty {
+    padding: 10px 12px;
+    color: #9e9278;
+    text-transform: capitalize;
 }
 
 .modal-network-picker {

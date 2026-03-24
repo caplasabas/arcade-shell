@@ -1,18 +1,50 @@
 import { supabase } from './supabase'
 
-export async function fetchDeviceBalance(deviceId: string) {
+export type DeviceBalanceSnapshot = {
+  balance: number
+  updatedAt: string | null
+  revision: number
+}
+
+function toNumber(value: unknown): number {
+  const n = Number(value ?? 0)
+  return Number.isFinite(n) ? n : 0
+}
+
+function computeDeviceRevision(raw: Record<string, unknown>): number {
+  return (
+    toNumber(raw.coins_in_total) +
+    toNumber(raw.hopper_in_total) +
+    toNumber(raw.hopper_out_total) +
+    toNumber(raw.bet_total) +
+    toNumber(raw.win_total) +
+    toNumber(raw.withdraw_total) +
+    toNumber(raw.spins_total)
+  )
+}
+
+export async function fetchDeviceBalance(deviceId: string): Promise<DeviceBalanceSnapshot> {
   const { data, error } = await supabase
     .from('devices')
-    .select('balance')
+    .select(
+      'balance, updated_at, coins_in_total, hopper_in_total, hopper_out_total, bet_total, win_total, withdraw_total, spins_total',
+    )
     .eq('device_id', deviceId)
     .single()
 
   if (error) throw error
 
-  return data.balance ?? 0
+  return {
+    balance: toNumber(data.balance),
+    updatedAt: data.updated_at ?? null,
+    revision: computeDeviceRevision(data as Record<string, unknown>),
+  }
 }
 
-export function subscribeToDeviceBalance(deviceId: string, onChange: (balance: number) => void) {
+export function subscribeToDeviceBalance(
+  deviceId: string,
+  onChange: (snapshot: DeviceBalanceSnapshot) => void,
+) {
   let disposed = false
   let reconnectTimer: number | null = null
   let channel: ReturnType<typeof supabase.channel> | null = null
@@ -57,7 +89,12 @@ export function subscribeToDeviceBalance(deviceId: string, onChange: (balance: n
           filter: `device_id=eq.${deviceId}`,
         },
         payload => {
-          onChange(Number(payload.new.balance ?? 0))
+          const row = payload.new as Record<string, unknown>
+          onChange({
+            balance: toNumber(row.balance),
+            updatedAt: (row.updated_at as string | null) ?? null,
+            revision: computeDeviceRevision(row),
+          })
         },
       )
       .subscribe(status => {

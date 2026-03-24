@@ -5,6 +5,7 @@ DISPLAY_VALUE="${ARCADE_RETRO_DISPLAY:-:1}"
 VT_VALUE="${ARCADE_RETRO_VT:-vt1}"
 SWITCH_TO_VT="${ARCADE_RETRO_SWITCH_TO_VT:-}"
 SWITCH_DELAY_MS="${ARCADE_RETRO_SWITCH_DELAY_MS:-1200}"
+SWITCH_SETTLE_MS="${ARCADE_RETRO_SWITCH_SETTLE_MS:-250}"
 XORG_BIN="${ARCADE_RETRO_XORG_BIN:-/usr/lib/xorg/Xorg}"
 SESSION_SCRIPT="${ARCADE_RETRO_SESSION_SCRIPT:-/opt/arcade/os/bin/arcade-retro-session.sh}"
 XORG_LOG="${ARCADE_RETRO_XORG_LOG:-/tmp/arcade-game-xorg.log}"
@@ -54,11 +55,7 @@ if ! DISPLAY="$DISPLAY_VALUE" xset q >/dev/null 2>&1; then
   exit 1
 fi
 
-DISPLAY="$DISPLAY_VALUE" XAUTHORITY="" "$SESSION_SCRIPT" >"$SESSION_LOG" 2>&1 &
-session_pid="$!"
-
-if [[ -n "$SWITCH_TO_VT" ]]; then
-  delay_seconds="$(python3 - "$SWITCH_DELAY_MS" <<'PY'
+switch_delay_seconds="$(python3 - "$SWITCH_DELAY_MS" <<'PY'
 import sys
 value = 1200
 try:
@@ -68,9 +65,26 @@ except Exception:
 print(f"{value / 1000:.3f}")
 PY
 )"
-  sleep "$delay_seconds"
+
+switch_settle_seconds="$(python3 - "$SWITCH_SETTLE_MS" <<'PY'
+import sys
+value = 250
+try:
+    value = max(0, int(float(sys.argv[1])))
+except Exception:
+    value = 250
+print(f"{value / 1000:.3f}")
+PY
+)"
+
+if [[ -n "$SWITCH_TO_VT" ]]; then
+  sleep "$switch_delay_seconds"
   chvt "$SWITCH_TO_VT" >/dev/null 2>&1 || true
+  sleep "$switch_settle_seconds"
 fi
+
+DISPLAY="$DISPLAY_VALUE" XAUTHORITY="" "$SESSION_SCRIPT" >"$SESSION_LOG" 2>&1 &
+session_pid="$!"
 
 wait "$session_pid"
 exit $?

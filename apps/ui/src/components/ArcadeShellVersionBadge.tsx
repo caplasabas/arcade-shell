@@ -7,11 +7,9 @@ type ArcadeShellBuildInfo = {
 
 type Props = {
   deviceId?: string | null
-  ethernetIp?: string | null
-  wifiIp?: string | null
 }
 
-export function ArcadeShellVersionBadge({ deviceId, ethernetIp, wifiIp }: Props) {
+export function ArcadeShellVersionBadge({ deviceId }: Props) {
   const [version, setVersion] = useState<string>('')
 
   useEffect(() => {
@@ -41,8 +39,6 @@ export function ArcadeShellVersionBadge({ deviceId, ethernetIp, wifiIp }: Props)
   const normalizedDeviceId = String(deviceId ?? '')
     .trim()
     .slice(0, 12)
-  const ipLabel = ethernetIp?.trim() || wifiIp?.trim() || 'n/a'
-
   return (
     <div
       style={{
@@ -68,7 +64,7 @@ export function ArcadeShellVersionBadge({ deviceId, ethernetIp, wifiIp }: Props)
       }}
     >
       <div style={{ fontSize: 13, fontWeight: 700 }}>{version}</div>
-      <div>{normalizedDeviceId ? `${normalizedDeviceId} - ${ipLabel}` : ipLabel}</div>
+      <div>{normalizedDeviceId || 'UNKNOWN DEVICE'}</div>
     </div>
   )
 }

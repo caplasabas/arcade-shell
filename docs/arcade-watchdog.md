@@ -1,6 +1,6 @@
 # Arcade Watchdog
 
-Tracks the Chromium kiosk, RetroArch emulator, network, and disk health so the cabinet can recover from crashes or freezes.
+Tracks the input service, Chromium kiosk, RetroArch emulator, network, and disk health so the cabinet can recover from crashes or freezes.
 
 ## Deployment
 1. Copy `scripts/arcade-watchdog.sh` to `/usr/local/bin/arcade-watchdog.sh` and `chmod +x` it.
@@ -10,6 +10,7 @@ Tracks the Chromium kiosk, RetroArch emulator, network, and disk health so the c
 5. Monitor `/var/log/arcade-watchdog/*.log` and `journalctl -fu arcade-watchdog` for behavior.
 
 ## Responsibilities
+- **Input service**: checks `arcade-input.service` plus an HTTP health probe (default `http://127.0.0.1:5174/device-id`) and restarts the service when it stops responding.
 - **Chromium**: relaunches if the `chromium` pattern disappears, logging the restart and piping output to a dedicated logfile.
 - **RetroArch**: restarts when the process exits or its CPU usage stays below `RETROARCH_STUCK_CPU_THRESHOLD` for `RETROARCH_STUCK_CYCLES` loops.
 - **Network**: pings `NETWORK_CHECK_HOST` (default `1.1.1.1`). After `NETWORK_FAILURE_RESTART_THRESHOLD` misses it runs `RESTART_NETWORK_COMMAND`, and if failures reach `NETWORK_FAILURE_REBOOT_THRESHOLD`, the watchdog triggers `systemctl reboot` (or `REBOOT_COMMAND` if set).

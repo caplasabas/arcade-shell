@@ -17,13 +17,24 @@ type MetricBucket = {
   event_ts: string
 }
 
+const FLUSH_SOON_MS = Number(import.meta.env.VITE_METRIC_FLUSH_SOON_MS ?? 80)
 const buckets = new Map<string, MetricBucket>()
 let flushInFlight = false
+let flushTimer: number | null = null
 
 const shouldWriteLedger = import.meta.env.VITE_METRIC_WRITE_LEDGER === '1'
 
 function getBucketKey(deviceId: string, eventType: MetricEventType) {
   return `${deviceId}::${eventType}`
+}
+
+function scheduleFlushSoon(delayMs = FLUSH_SOON_MS) {
+  if (flushTimer) return
+
+  flushTimer = window.setTimeout(() => {
+    flushTimer = null
+    void flushMetricEvents()
+  }, Math.max(0, delayMs))
 }
 
 export function queueMetricEvent(
@@ -41,6 +52,7 @@ export function queueMetricEvent(
   if (existing) {
     existing.amount += safeAmount
     existing.event_ts = eventTs
+    scheduleFlushSoon()
     return
   }
 
@@ -50,6 +62,8 @@ export function queueMetricEvent(
     amount: safeAmount,
     event_ts: eventTs,
   })
+
+  scheduleFlushSoon()
 }
 
 export async function flushMetricEvents() {

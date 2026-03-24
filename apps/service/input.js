@@ -1483,7 +1483,7 @@ async function fetchCabinetGamesForDevice(deviceId = DEVICE_ID) {
     `${SUPABASE_URL}/rest/v1/cabinet_games?` +
     `select=device_id,game_id,games!inner(` +
     `id,name,type,price,join_mode,box_art_url,emulator_core,rom_path,package_url,version,enabled` +
-    `)&device_id=eq.${encodeURIComponent(safeDeviceId)}&installed=eq.true&games.enabled=eq.true`
+    `)&device_id=eq.${encodeURIComponent(safeDeviceId)}&installed=eq.true`
 
   try {
     const response = await requestJsonWithCurl(url, {
@@ -1507,6 +1507,7 @@ async function fetchCabinetGamesForDevice(deviceId = DEVICE_ID) {
         id: game.id,
         name: game.name,
         type: game.type,
+        enabled: game.enabled !== false,
         price: toMoney(game.price, 0),
         join_mode: normalizeArcadeJoinMode(game.join_mode),
         art: String(game.box_art_url || '').startsWith('assets/boxart/')
@@ -1517,7 +1518,12 @@ async function fetchCabinetGamesForDevice(deviceId = DEVICE_ID) {
         package_url: game.package_url || null,
         version: Number(game.version || 1),
       }))
-      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+      .filter(game => game.type !== 'casino' || game.enabled !== false)
+      .sort((a, b) => {
+        const enabledDelta = Number(b.enabled !== false) - Number(a.enabled !== false)
+        if (enabledDelta !== 0) return enabledDelta
+        return String(a.name || '').localeCompare(String(b.name || ''))
+      })
   } catch (err) {
     console.error('[CABINET GAMES] fetch error', err?.message || err)
     return []
@@ -3137,24 +3143,24 @@ async function installEncryptedGamePackage({ id, packageUrl, version, force = fa
     }
   }
 
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 30_000)
-  let response
+  const downloadPath = path.join(os.tmpdir(), `arcade-${gameId}-${gameVersion}-${Date.now()}.enc`)
+  let encrypted
   try {
-    response = await fetch(packageUrl, {
-      signal: controller.signal,
-    })
+    await execFileAsync('curl', [
+      '-fsSL',
+      '--max-time',
+      '30',
+      '--output',
+      downloadPath,
+      packageUrl,
+    ])
+
+    encrypted = fs.readFileSync(downloadPath)
+    if (encrypted.length < 29) {
+      throw new Error('invalid encrypted payload')
+    }
   } finally {
-    clearTimeout(timeout)
-  }
-
-  if (!response.ok) {
-    throw new Error(`package download failed: ${response.status}`)
-  }
-
-  const encrypted = Buffer.from(await response.arrayBuffer())
-  if (encrypted.length < 29) {
-    throw new Error('invalid encrypted payload')
+    fs.rmSync(downloadPath, { force: true })
   }
 
   const iv = encrypted.subarray(0, 12)
@@ -3325,9 +3331,20 @@ function getNetworkInfo() {
     return found?.address || null
   }
 
+  const pickActiveName = iface => {
+    try {
+      const name = os.networkInterfaces()[iface]?.find(e => e && e.family === 'IPv4' && !e.internal)
+      return name ? iface : null
+    } catch {
+      return null
+    }
+  }
+
   return {
     ethernet: pickIpv4('eth0'),
     wifi: pickIpv4('wlan0'),
+    ethernet_name: pickActiveName('eth0'),
+    wifi_name: pickActiveName('wlan0'),
   }
 }
 
@@ -3503,8 +3520,56 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  if (req.method === 'GET' && req.url === '/wifi-known') {
+    if (!IS_PI) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      return res.end(
+        JSON.stringify([
+          { ssid: 'DEV_WIFI', type: 'wifi' },
+          { ssid: 'DEV_HOTSPOT', type: 'wifi' },
+        ]),
+      )
+    }
+
+    exec(
+      'nmcli -t --escape no -f NAME,TYPE,802-11-wireless.ssid connection show',
+      (err, stdout) => {
+        if (err) {
+          console.error('[WIFI] Known profiles scan failed', err)
+          res.writeHead(500)
+          return res.end('Error')
+        }
+
+        const profiles = stdout
+          .split('\n')
+          .filter(Boolean)
+          .map(line => {
+            const parts = line.split(':')
+            if (parts.length < 2) return null
+            const id = (parts[0] || '').trim()
+            const type = (parts[1] || '').trim()
+            const ssid = parts.slice(2).join(':').trim()
+            return { id, ssid: ssid || id, type }
+          })
+          .filter(Boolean)
+          .filter(
+            n =>
+              n.ssid &&
+              n.ssid.trim() !== '' &&
+              (n.type === 'wifi' || n.type === '802-11-wireless' || n.type === 'wireless'),
+          )
+          .map(n => ({ id: n.id, ssid: n.ssid }))
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(profiles))
+      },
+    )
+    return
+  }
+
   if (req.method === 'GET') {
-    const safePath = path.normalize(req.url).replace(/^(\.\.[\/\\])+/, '')
+    const parsedUrl = new URL(req.url || '/', 'http://127.0.0.1')
+    const safePath = path.normalize(parsedUrl.pathname).replace(/^(\.\.[\/\\])+/, '')
 
     if (safePath === '/arcade-shell-build.json') {
       const versionFilePath = path.join(ARCADE_RUNTIME_DIR, 'os', '.arcade-shell-version')
@@ -3727,6 +3792,61 @@ const server = http.createServer((req, res) => {
         })
       } catch (e) {
         console.error('[WIFI] Invalid request', e)
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false }))
+      }
+    })
+
+    return
+  }
+
+  if (req.method === 'POST' && req.url === '/wifi-connect-known') {
+    let body = ''
+
+    req.on('data', chunk => {
+      body += chunk
+    })
+
+    req.on('end', async () => {
+      try {
+        const { id, ssid } = JSON.parse(body || '{}')
+        const profileId = String(id || ssid || '').trim()
+
+        if (!profileId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ success: false, error: 'Missing profile' }))
+        }
+
+        if (!IS_PI) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ success: true }))
+          broadcast({ type: 'INTERNET_RESTORED' })
+          return
+        }
+
+        console.log('[WIFI] Activating known profile', profileId)
+        const nm = spawn('sudo', ['nmcli', 'connection', 'up', 'id', profileId])
+
+        nm.on('close', async code => {
+          if (code !== 0) {
+            console.error('[WIFI] known profile activation failed with code', code)
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify({ success: false }))
+          }
+
+          setTimeout(async () => {
+            const online = await checkInternetOnce()
+
+            res.writeHead(200, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ success: online }))
+
+            if (online) {
+              broadcast({ type: 'INTERNET_RESTORED' })
+            }
+          }, 2000)
+        })
+      } catch (e) {
+        console.error('[WIFI] Invalid known profile request', e)
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: false }))
       }
@@ -4032,6 +4152,16 @@ const server = http.createServer((req, res) => {
           console.warn('[LAUNCH] Ignored — RetroArch already active')
           res.writeHead(409)
           return res.end('Already running')
+        }
+
+        if (payloadPrice > 0 && payloadBalance < payloadPrice) {
+          console.warn('[LAUNCH] Ignored — insufficient balance', {
+            gameId: payloadGameId,
+            balance: payloadBalance,
+            price: payloadPrice,
+          })
+          res.writeHead(402)
+          return res.end('Insufficient balance')
         }
 
         if (Date.now() - lastExitTime < RETROARCH_POST_EXIT_LAUNCH_COOLDOWN_MS) {
