@@ -9,9 +9,9 @@ import { ArcadeShellVersionBadge } from './components/ArcadeShellVersionBadge'
 
 import { exitGame, isGameRunning, launchGame } from './lib/gameLoader'
 import {
+  type DeviceBalanceSnapshot,
   fetchDeviceBalance,
   subscribeToDeviceBalance,
-  type DeviceBalanceSnapshot,
 } from './lib/balance'
 import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './lib/games'
 import { WithdrawModal } from './components/WithdrawModal'
@@ -49,9 +49,7 @@ const EXIT_CONFIRM_WINDOW_MS = 2800
 const BOOT_UPDATER_NETWORK_GRACE_MS = 4500
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
-const INTERNET_LOSS_UI_DEBOUNCE_MS = 1200
-const ARCADE_SHELL_VERSION =
-  String(import.meta.env.VITE_ARCADE_SHELL_VERSION || '').trim() || '0.6.0'
+
 type SettingsItem = 'volume' | 'network' | 'reboot' | 'shutdown'
 
 type ShellUpdateStatus = {
@@ -333,36 +331,39 @@ export default function App() {
     pendingMetricQueueRef.current = nextQueue
   }, [])
 
-  const applyAuthoritativeBalance = useCallback((snapshot: DeviceBalanceSnapshot) => {
-    const nextBalance = Number(snapshot.balance ?? 0)
-    if (!Number.isFinite(nextBalance)) return
+  const applyAuthoritativeBalance = useCallback(
+    (snapshot: DeviceBalanceSnapshot) => {
+      const nextBalance = Number(snapshot.balance ?? 0)
+      if (!Number.isFinite(nextBalance)) return
 
-    const updatedAtMs = snapshot.updatedAt ? Date.parse(snapshot.updatedAt) : NaN
-    const previousRevision = lastAuthoritativeRevisionRef.current
-    const nextRevision = Number(snapshot.revision ?? 0)
-    const normalizedRevision = Number.isFinite(nextRevision) ? nextRevision : 0
+      const updatedAtMs = snapshot.updatedAt ? Date.parse(snapshot.updatedAt) : NaN
+      const previousRevision = lastAuthoritativeRevisionRef.current
+      const nextRevision = Number(snapshot.revision ?? 0)
+      const normalizedRevision = Number.isFinite(nextRevision) ? nextRevision : 0
 
-    if (normalizedRevision < previousRevision) return
-    if (
-      normalizedRevision === previousRevision &&
-      Number.isFinite(updatedAtMs) &&
-      updatedAtMs < lastAuthoritativeUpdatedAtRef.current
-    ) {
-      return
-    }
+      if (normalizedRevision < previousRevision) return
+      if (
+        normalizedRevision === previousRevision &&
+        Number.isFinite(updatedAtMs) &&
+        updatedAtMs < lastAuthoritativeUpdatedAtRef.current
+      ) {
+        return
+      }
 
-    if (Number.isFinite(updatedAtMs)) {
-      lastAuthoritativeUpdatedAtRef.current = updatedAtMs
-    }
-    lastAuthoritativeRevisionRef.current = normalizedRevision
-    authoritativeBalanceRef.current = nextBalance
+      if (Number.isFinite(updatedAtMs)) {
+        lastAuthoritativeUpdatedAtRef.current = updatedAtMs
+      }
+      lastAuthoritativeRevisionRef.current = normalizedRevision
+      authoritativeBalanceRef.current = nextBalance
 
-    if (normalizedRevision > previousRevision) {
-      consumePendingRevision(normalizedRevision - previousRevision)
-    }
+      if (normalizedRevision > previousRevision) {
+        consumePendingRevision(normalizedRevision - previousRevision)
+      }
 
-    setMergedBalance(nextBalance)
-  }, [consumePendingRevision, setMergedBalance])
+      setMergedBalance(nextBalance)
+    },
+    [consumePendingRevision, setMergedBalance],
+  )
 
   const wifiConnectedRef = useRef(wifiConnected)
   useEffect(() => {
@@ -385,7 +386,7 @@ export default function App() {
     hasLocalLinkRef.current = Boolean(wifiConnected || ethernetIp)
   }, [wifiConnected, ethernetIp])
 
-  const [loading, setLoading] = useState(false)
+  const [, setLoading] = useState(false)
   const [transitionOverlay, setTransitionOverlay] = useState<TransitionOverlayState>({
     visible: false,
     label: 'Loading Game...',
@@ -455,52 +456,55 @@ export default function App() {
     )
   }
 
-  const recoverDeviceState = useCallback(async (reason: string) => {
-    if (recoveryInFlightRef.current) return
+  const recoverDeviceState = useCallback(
+    async (reason: string) => {
+      if (recoveryInFlightRef.current) return
 
-    recoveryInFlightRef.current = true
-    setLoading(true)
-    try {
-      console.log(`[RECOVERY] Auto re-init start (${reason})`)
-      const id = await ensureDeviceRegistered('Arcade Cabinet')
-      deviceIdRef.current = id
-      setDeviceId(current => (current === id ? current : id))
+      recoveryInFlightRef.current = true
+      setLoading(true)
+      try {
+        console.log(`[RECOVERY] Auto re-init start (${reason})`)
+        const id = await ensureDeviceRegistered('Arcade Cabinet')
+        deviceIdRef.current = id
+        setDeviceId(current => (current === id ? current : id))
 
-      const [nextBalance, nextGames] = await Promise.all([
-        fetchDeviceBalance(id).catch(() => ({
-          balance: 0,
-          updatedAt: null,
-          revision: 0,
-        })),
-        fetchCabinetGames(id).catch(() => [] as Game[]),
-      ])
+        const [nextBalance, nextGames] = await Promise.all([
+          fetchDeviceBalance(id).catch(() => ({
+            balance: 0,
+            updatedAt: null,
+            revision: 0,
+          })),
+          fetchCabinetGames(id).catch(() => [] as Game[]),
+        ])
 
-      resetPendingBalance()
-      applyAuthoritativeBalance(nextBalance)
-      setGames(nextGames)
-      setInitialized(true)
-      setNetworkStage('ok')
+        resetPendingBalance()
+        applyAuthoritativeBalance(nextBalance)
+        setGames(nextGames)
+        setInitialized(true)
+        setNetworkStage('ok')
 
-      const current = runningGameRef.current
-      if (current && !nextGames.find(g => g.id === current.id)) {
-        handleExitGame()
-      }
-
-      setFocus(prev => {
-        if (prev >= nextGames.length) {
-          return Math.max(0, nextGames.length - 1)
+        const current = runningGameRef.current
+        if (current && !nextGames.find(g => g.id === current.id)) {
+          handleExitGame()
         }
-        return prev
-      })
 
-      console.log(`[RECOVERY] Auto re-init complete (${reason})`)
-    } catch (err) {
-      console.error(`[RECOVERY] Auto re-init failed (${reason})`, err)
-    } finally {
-      setLoading(false)
-      recoveryInFlightRef.current = false
-    }
-  }, [applyAuthoritativeBalance, resetPendingBalance])
+        setFocus(prev => {
+          if (prev >= nextGames.length) {
+            return Math.max(0, nextGames.length - 1)
+          }
+          return prev
+        })
+
+        console.log(`[RECOVERY] Auto re-init complete (${reason})`)
+      } catch (err) {
+        console.error(`[RECOVERY] Auto re-init failed (${reason})`, err)
+      } finally {
+        setLoading(false)
+        recoveryInFlightRef.current = false
+      }
+    },
+    [applyAuthoritativeBalance, resetPendingBalance],
+  )
 
   const executeLocalPowerCommand = useCallback(async (command: DeviceAdminCommandType) => {
     if (command === 'reset') {
@@ -528,9 +532,12 @@ export default function App() {
   const refreshVolumeState = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/system/volume`)
-      const payload = (await response.json().catch(() => null)) as
-        | { success?: boolean; volume?: string; percent?: number | null; error?: string }
-        | null
+      const payload = (await response.json().catch(() => null)) as {
+        success?: boolean
+        volume?: string
+        percent?: number | null
+        error?: string
+      } | null
 
       if (!response.ok) {
         throw new Error(`volume read failed (${response.status})`)
@@ -567,9 +574,12 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ direction, step }),
         })
-        const payload = (await response.json().catch(() => null)) as
-          | { success?: boolean; volume?: string; percent?: number | null; error?: string }
-          | null
+        const payload = (await response.json().catch(() => null)) as {
+          success?: boolean
+          volume?: string
+          percent?: number | null
+          error?: string
+        } | null
         if (!response.ok) {
           if (payload?.error === 'NO_AUDIO_DEVICE' || payload?.volume === 'NO AUDIO DEVICE') {
             setVolumeLabel('NO AUDIO DEVICE')
@@ -620,6 +630,41 @@ export default function App() {
     setShowSettingsModal(false)
     setShowWifiModal(true)
   }, [])
+
+  const closeWifiSettingsToSettings = useCallback(() => {
+    setShowWifiModal(false)
+    setShowSettingsModal(true)
+  }, [])
+
+  const deleteKnownWifiProfile = useCallback(
+    async (profile: { id: string; ssid: string }) => {
+      try {
+        const response = await fetch(`${API_BASE}/wifi-delete-known`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: profile.id, ssid: profile.ssid }),
+        })
+
+        const payload = (await response.json().catch(() => null)) as {
+          success?: boolean
+          error?: string
+        } | null
+
+        if (!response.ok || !payload?.success) {
+          flashUiNotice('DELETE FAILED')
+          return false
+        }
+
+        flashUiNotice('NETWORK DELETED')
+        return true
+      } catch (error) {
+        console.error('[WIFI] delete known profile failed', error)
+        flashUiNotice('DELETE FAILED')
+        return false
+      }
+    },
+    [flashUiNotice],
+  )
 
   const handleSettingsAction = useCallback(async () => {
     switch (selectedSettingsItem) {
@@ -684,7 +729,9 @@ export default function App() {
 
         // Keep the shell usable when the Pi still has a local network link but
         // remote services are slow or temporarily unreachable.
-        setNetworkStage(wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet')
+        setNetworkStage(
+          wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet',
+        )
       } finally {
         if (!cancelled) {
           setLoading(false)
@@ -709,7 +756,11 @@ export default function App() {
       return
     }
 
-    if (bootFlowComplete || shellUpdateRequestedRef.current || shellUpdateSkippedThisBootRef.current)
+    if (
+      bootFlowComplete ||
+      shellUpdateRequestedRef.current ||
+      shellUpdateSkippedThisBootRef.current
+    )
       return
 
     shellUpdateStableTimerRef.current = window.setTimeout(async () => {
@@ -782,7 +833,9 @@ export default function App() {
       setBootFlowComplete(true)
 
       if (networkStageRef.current === 'boot') {
-        setNetworkStage(wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet')
+        setNetworkStage(
+          wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet',
+        )
       }
     }, BOOT_UPDATER_NETWORK_GRACE_MS)
 
@@ -1154,7 +1207,9 @@ export default function App() {
       }
 
       handleExitGame()
-      await new Promise(resolve => window.setTimeout(resolve, current.type === 'casino' ? 350 : 150))
+      await new Promise(resolve =>
+        window.setTimeout(resolve, current.type === 'casino' ? 350 : 150),
+      )
     }
 
     preparedCasinoVersionRef.current = {}
@@ -2355,6 +2410,8 @@ export default function App() {
             setNetworkStage('ok')
             flashUiNotice('NETWORK READY')
           }}
+          onClose={closeWifiSettingsToSettings}
+          onDeleteKnownProfile={deleteKnownWifiProfile}
           wifiConnected={wifiConnected}
           currentSsid={wifiSsid}
           currentIp={ethernetIp ?? wifiIp}
@@ -2416,8 +2473,7 @@ export default function App() {
             <div className="top-status-network">
               <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
               <span className="top-status-ssid">
-                {wifiSsid?.trim() ||
-                  (wifiConnected ? 'Connected' : ethernetName || 'Offline')}
+                {wifiSsid?.trim() || (wifiConnected ? 'Connected' : ethernetName || 'Offline')}
               </span>
             </div>
             <div>{formatDateTime(now)}</div>

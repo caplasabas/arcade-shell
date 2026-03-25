@@ -148,38 +148,67 @@
 
 .tile-price-badge {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: 10px;
+    right: 10px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     min-width: 0;
-    max-width: calc(100% - 24px);
-    padding: 5px 10px 4px;
+    max-width: calc(100% - 20px);
+    padding: 7px 12px 6px;
     border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.16);
+    border: 1px solid rgba(255, 255, 255, 0.22);
     background: rgba(10, 10, 10, 0.82);
-    color: rgba(255, 244, 214, 0.98);
-    font-size: 11px;
-    font-weight: 800;
-    letter-spacing: 0.08em;
+    color: rgba(255, 250, 232, 0.99);
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 0.1em;
     line-height: 1;
     text-transform: uppercase;
     white-space: nowrap;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
     pointer-events: none;
+    transform: translateZ(0);
 }
 
 .tile-price-badge.arcade {
-    background: linear-gradient(180deg, rgba(192, 45, 45, 0.96), rgba(136, 18, 18, 0.92));
+    background: linear-gradient(180deg, rgba(245, 181, 63, 0.98), rgba(214, 132, 24, 0.94));
+    color: rgba(34, 20, 0, 0.96);
+    border-color: rgba(255, 241, 190, 0.46);
+    box-shadow: 0 10px 24px rgba(166, 104, 16, 0.38);
+}
+
+.tile-price-badge.arcade.affordable {
+    background: linear-gradient(180deg, rgba(64, 196, 114, 0.98), rgba(28, 132, 73, 0.94));
+    color: rgba(244, 255, 248, 0.98);
+    border-color: rgba(200, 255, 219, 0.36);
+    box-shadow: 0 10px 24px rgba(20, 116, 67, 0.34);
+}
+
+.tile-price-badge.arcade.unaffordable {
+    background: linear-gradient(180deg, rgba(245, 181, 63, 0.98), rgba(214, 132, 24, 0.94));
+    color: rgba(34, 20, 0, 0.96);
+    border-color: rgba(255, 241, 190, 0.46);
+    box-shadow: 0 10px 24px rgba(166, 104, 16, 0.38);
 }
 
 .tile-price-badge.arcade.disabled {
-    background: linear-gradient(180deg, rgba(110, 110, 110, 0.9), rgba(72, 72, 72, 0.9));
+    background: linear-gradient(180deg, rgba(118, 118, 118, 0.92), rgba(74, 74, 74, 0.92));
+    color: rgba(255, 247, 229, 0.9);
+    border-color: rgba(255, 255, 255, 0.16);
+    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
 }
 
 .tile-price-badge.casino {
-    background: linear-gradient(180deg, rgba(31, 130, 79, 0.96), rgba(15, 96, 56, 0.92));
+    background: linear-gradient(180deg, rgba(46, 171, 103, 0.98), rgba(20, 116, 67, 0.94));
+    color: rgba(242, 255, 246, 0.98);
+    border-color: rgba(185, 255, 213, 0.32);
+    box-shadow: 0 10px 24px rgba(15, 96, 56, 0.32);
+}
+
+.tile.focused .tile-price-badge {
+    transform: scale(1.08);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.46);
 }
 
 .focus-ring {

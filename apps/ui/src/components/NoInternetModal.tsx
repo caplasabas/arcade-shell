@@ -12,9 +12,20 @@ export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props
   useEffect(() => {
     connectButtonRef.current?.focus()
 
+    const isConfirm = (button: string | number) =>
+      button === 0 ||
+      button === '0' ||
+      button === 'A' ||
+      button === 'START' ||
+      button === 1 ||
+      button === '1'
+
     const onArcadeInput = (event: Event) => {
       const customEvent = event as CustomEvent<{ button?: string | number }>
-      if (customEvent.detail?.button === 1) {
+      const button = customEvent.detail?.button
+      if (button === undefined || button === null) return
+
+      if (isConfirm(button)) {
         onConnect()
       }
     }

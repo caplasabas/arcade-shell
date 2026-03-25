@@ -12,7 +12,6 @@ import http from 'http'
 import { exec, execFile, spawn, spawnSync } from 'child_process'
 import { createDecipheriv, createHash } from 'crypto'
 import dgram from 'dgram'
-import net from 'net'
 import os from 'os'
 
 import fs from 'fs'
@@ -172,7 +171,10 @@ function execFileAsync(file, args, options = {}) {
   })
 }
 
-async function requestJsonWithCurl(url, { method = 'GET', body = null, headers = {}, timeoutMs = 2500 } = {}) {
+async function requestJsonWithCurl(
+  url,
+  { method = 'GET', body = null, headers = {}, timeoutMs = 2500 } = {},
+) {
   const args = [
     '-sS',
     '-L',
@@ -788,7 +790,9 @@ function sendRetroarchNetCommand(command, options = {}) {
     if (!retroarchProcess?.stdin?.writable) return false
     try {
       retroarchProcess.stdin.write(message)
-      console.log(`[RETROARCH OSD] #${attempt}/${retryCount}${urgent ? ' urgent' : ''} stdin ${clean}`)
+      console.log(
+        `[RETROARCH OSD] #${attempt}/${retryCount}${urgent ? ' urgent' : ''} stdin ${clean}`,
+      )
       return true
     } catch (err) {
       console.error('[RETROARCH OSD] stdin send failed', err?.message || err)
@@ -960,11 +964,11 @@ function getArcadeRetroFooterState(balanceOverride = null) {
           : 'PRESS [START]'
   const visible = Boolean(
     arcadeOverlayNotice ||
-      exitConfirmArmed ||
-      p1ConfirmArmed ||
-      p2ConfirmArmed ||
-      !p1HasCredit ||
-      !p2HasCredit,
+    exitConfirmArmed ||
+    p1ConfirmArmed ||
+    p2ConfirmArmed ||
+    !p1HasCredit ||
+    !p2HasCredit,
   )
 
   return {
@@ -1701,7 +1705,11 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
       const priceText = getArcadeSessionPrice().toFixed(2)
       const balanceText = formatArcadeBalanceForOsd(result.balance)
 
-      if (String(result.reason || '').toLowerCase().includes('offline')) {
+      if (
+        String(result.reason || '')
+          .toLowerCase()
+          .includes('offline')
+      ) {
         setArcadeOverlayNotice(`OFFLINE`, 2200, 'center')
         showArcadeOsdMessage(composeArcadeOsdOverlay(`OFFLINE`, result.balance))
       } else {
@@ -2350,9 +2358,7 @@ function handleRawAxis(source, code, value) {
   const shouldSwapP2Axes = source === 'P2' && retroarchActive && RETROARCH_P2_SWAP_AXES
   const effectiveCode = shouldSwapP2Axes ? (code === 0 ? 1 : code === 1 ? 0 : code) : code
   const effectiveValue =
-    shouldSwapP2Axes && effectiveCode === 0 && Number.isFinite(value)
-      ? 255 - value
-      : value
+    shouldSwapP2Axes && effectiveCode === 0 && Number.isFinite(value) ? 255 - value : value
 
   if (!retroarchActive) {
     if (code === 0) {
@@ -3009,6 +3015,127 @@ if (IS_PI) {
 }
 
 const PORT = 5174
+let wifiOperationInFlight = false
+
+function execCommand(command, args = []) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout
+        error.stderr = stderr
+        reject(error)
+        return
+      }
+
+      resolve({ stdout, stderr })
+    })
+  })
+}
+
+async function rescanWifiNetworks() {
+  await execCommand('nmcli', ['device', 'wifi', 'rescan'])
+}
+
+async function listWifiNetworks({ rescan = false } = {}) {
+  if (rescan) {
+    try {
+      await rescanWifiNetworks()
+    } catch (error) {
+      console.warn('[WIFI] rescan warning', error?.stderr || error?.message || error)
+    }
+  }
+
+  const { stdout } = await execCommand('nmcli', [
+    '-t',
+    '--escape',
+    'no',
+    '-f',
+    'SSID,SIGNAL',
+    'device',
+    'wifi',
+    'list',
+    '--rescan',
+    'no',
+  ])
+
+  const strongestBySsid = new Map()
+
+  for (const line of String(stdout || '')
+    .split('\n')
+    .filter(Boolean)) {
+    const sep = line.lastIndexOf(':')
+    if (sep <= 0) continue
+
+    const ssid = line.slice(0, sep).trim()
+    const signal = Number(line.slice(sep + 1))
+
+    if (!ssid) continue
+
+    const network = {
+      ssid,
+      signal: Number.isFinite(signal) ? signal : 0,
+    }
+
+    const existing = strongestBySsid.get(ssid)
+    if (!existing || network.signal > existing.signal) {
+      strongestBySsid.set(ssid, network)
+    }
+  }
+
+  return [...strongestBySsid.values()].sort((a, b) => b.signal - a.signal)
+}
+
+async function listKnownWifiProfiles() {
+  const { stdout } = await execCommand('nmcli', [
+    '-t',
+    '--escape',
+    'no',
+    '-f',
+    'NAME,TYPE',
+    'connection',
+    'show',
+  ])
+
+  const profiles = []
+  const seenIds = new Set()
+
+  for (const line of String(stdout || '')
+    .split('\n')
+    .filter(Boolean)) {
+    const parts = line.split(':')
+    if (parts.length < 2) continue
+
+    const id = (parts[0] || '').trim()
+    const type = (parts[1] || '').trim()
+
+    if (!id) continue
+    if (!(type === 'wifi' || type === '802-11-wireless' || type === 'wireless')) continue
+    if (seenIds.has(id)) continue
+
+    seenIds.add(id)
+
+    let ssid = id
+    try {
+      const { stdout: ssidStdout } = await execCommand('nmcli', [
+        '--escape',
+        'no',
+        '-g',
+        '802-11-wireless.ssid',
+        'connection',
+        'show',
+        id,
+      ])
+      const resolvedSsid = String(ssidStdout || '').trim()
+      if (resolvedSsid) ssid = resolvedSsid
+    } catch (error) {
+      console.warn('[WIFI] profile ssid fallback', id, error?.stderr || error?.message || error)
+    }
+
+    profiles.push({ id, ssid })
+  }
+
+  return profiles
+}
 
 function readHardwareSerial() {
   if (!IS_PI) {
@@ -3146,14 +3273,7 @@ async function installEncryptedGamePackage({ id, packageUrl, version, force = fa
   const downloadPath = path.join(os.tmpdir(), `arcade-${gameId}-${gameVersion}-${Date.now()}.enc`)
   let encrypted
   try {
-    await execFileAsync('curl', [
-      '-fsSL',
-      '--max-time',
-      '30',
-      '--output',
-      downloadPath,
-      packageUrl,
-    ])
+    await execFileAsync('curl', ['-fsSL', '--max-time', '30', '--output', downloadPath, packageUrl])
 
     encrypted = fs.readFileSync(downloadPath)
     if (encrypted.length < 29) {
@@ -3489,33 +3609,17 @@ const server = http.createServer((req, res) => {
       )
     }
 
-    exec(
-      'sudo nmcli device wifi rescan; sudo nmcli -t --escape no -f SSID,SIGNAL device wifi list --rescan no',
-      (err, stdout) => {
-        if (err) {
-          console.error('[WIFI] Scan failed', err)
-          res.writeHead(500)
-          return res.end('Error')
-        }
-
-        const networks = stdout
-          .split('\n')
-          .filter(Boolean)
-          .map(line => {
-            const sep = line.lastIndexOf(':')
-            if (sep <= 0) return null
-            const ssid = line.slice(0, sep).trim()
-            const signal = Number(line.slice(sep + 1))
-            return { ssid, signal: Number.isFinite(signal) ? signal : 0 }
-          })
-          .filter(Boolean)
-          .filter(n => n.ssid && n.ssid.trim() !== '')
-          .sort((a, b) => b.signal - a.signal)
-
+    ;(async () => {
+      try {
+        const networks = await listWifiNetworks({ rescan: true })
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(networks))
-      },
-    )
+      } catch (error) {
+        console.error('[WIFI] Scan failed', error?.stderr || error?.message || error)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: 'WIFI_SCAN_FAILED' }))
+      }
+    })()
 
     return
   }
@@ -3531,39 +3635,17 @@ const server = http.createServer((req, res) => {
       )
     }
 
-    exec(
-      'nmcli -t --escape no -f NAME,TYPE,802-11-wireless.ssid connection show',
-      (err, stdout) => {
-        if (err) {
-          console.error('[WIFI] Known profiles scan failed', err)
-          res.writeHead(500)
-          return res.end('Error')
-        }
-
-        const profiles = stdout
-          .split('\n')
-          .filter(Boolean)
-          .map(line => {
-            const parts = line.split(':')
-            if (parts.length < 2) return null
-            const id = (parts[0] || '').trim()
-            const type = (parts[1] || '').trim()
-            const ssid = parts.slice(2).join(':').trim()
-            return { id, ssid: ssid || id, type }
-          })
-          .filter(Boolean)
-          .filter(
-            n =>
-              n.ssid &&
-              n.ssid.trim() !== '' &&
-              (n.type === 'wifi' || n.type === '802-11-wireless' || n.type === 'wireless'),
-          )
-          .map(n => ({ id: n.id, ssid: n.ssid }))
-
+    ;(async () => {
+      try {
+        const profiles = await listKnownWifiProfiles()
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(profiles))
-      },
-    )
+      } catch (error) {
+        console.error('[WIFI] Known profiles scan failed', error?.stderr || error?.message || error)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: 'WIFI_KNOWN_FAILED' }))
+      }
+    })()
     return
   }
 
@@ -3767,13 +3849,24 @@ const server = http.createServer((req, res) => {
           return
         }
 
+        if (wifiOperationInFlight) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ success: false, error: 'WIFI_BUSY' }))
+        }
+
+        wifiOperationInFlight = true
         console.log('[WIFI] Attempting connection to', ssid)
 
-        const nm = spawn('sudo', ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password])
+        const nm = spawn('nmcli', ['device', 'wifi', 'connect', ssid, 'password', password])
+        let nmStderr = ''
+        nm.stderr?.on('data', chunk => {
+          nmStderr += String(chunk || '')
+        })
 
         nm.on('close', async code => {
           if (code !== 0) {
-            console.error('[WIFI] nmcli failed with code', code)
+            wifiOperationInFlight = false
+            console.error('[WIFI] nmcli failed with code', code, nmStderr.trim())
             res.writeHead(200, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify({ success: false }))
           }
@@ -3781,6 +3874,7 @@ const server = http.createServer((req, res) => {
           // Give NetworkManager time to settle
           setTimeout(async () => {
             const online = await checkInternetOnce()
+            wifiOperationInFlight = false
 
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: online }))
@@ -3791,6 +3885,7 @@ const server = http.createServer((req, res) => {
           }, 3000)
         })
       } catch (e) {
+        wifiOperationInFlight = false
         console.error('[WIFI] Invalid request', e)
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: false }))
@@ -3824,18 +3919,35 @@ const server = http.createServer((req, res) => {
           return
         }
 
+        if (wifiOperationInFlight) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ success: false, error: 'WIFI_BUSY' }))
+        }
+
+        wifiOperationInFlight = true
         console.log('[WIFI] Activating known profile', profileId)
-        const nm = spawn('sudo', ['nmcli', 'connection', 'up', 'id', profileId])
+        exec('nmcli device disconnect wlan0 || true', err => {
+          if (err) {
+            console.warn('[WIFI] wlan0 disconnect pre-step warning', err.message)
+          }
+        })
+        const nm = spawn('nmcli', ['connection', 'up', 'id', profileId])
+        let nmStderr = ''
+        nm.stderr?.on('data', chunk => {
+          nmStderr += String(chunk || '')
+        })
 
         nm.on('close', async code => {
           if (code !== 0) {
-            console.error('[WIFI] known profile activation failed with code', code)
+            wifiOperationInFlight = false
+            console.error('[WIFI] known profile activation failed with code', code, nmStderr.trim())
             res.writeHead(200, { 'Content-Type': 'application/json' })
             return res.end(JSON.stringify({ success: false }))
           }
 
           setTimeout(async () => {
             const online = await checkInternetOnce()
+            wifiOperationInFlight = false
 
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: online }))
@@ -3846,9 +3958,84 @@ const server = http.createServer((req, res) => {
           }, 2000)
         })
       } catch (e) {
+        wifiOperationInFlight = false
         console.error('[WIFI] Invalid known profile request', e)
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ success: false }))
+      }
+    })
+
+    return
+  }
+
+  if (req.method === 'POST' && req.url === '/wifi-delete-known') {
+    let body = ''
+
+    req.on('data', chunk => {
+      body += chunk
+    })
+
+    req.on('end', async () => {
+      try {
+        const { id, ssid } = JSON.parse(body || '{}')
+        const profileId = String(id || '').trim()
+        const profileSsid = String(ssid || '').trim()
+
+        if (!profileId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ success: false, error: 'Missing profile' }))
+        }
+
+        if (!IS_PI) {
+          console.log('[WIFI] compat-mode delete accepted for', profileId)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ success: true }))
+        }
+
+        let activeSsid = ''
+        try {
+          const { stdout: activeStdout } = await execCommand('nmcli', [
+            '-t',
+            '--escape',
+            'no',
+            '-f',
+            'ACTIVE,SSID',
+            'device',
+            'wifi',
+            'list',
+            '--rescan',
+            'no',
+          ])
+
+          const activeLine = String(activeStdout || '')
+            .split('\n')
+            .find(line => line.startsWith('yes:'))
+          activeSsid = activeLine ? activeLine.replace(/^yes:/, '').trim() : ''
+        } catch (error) {
+          console.warn(
+            '[WIFI] active SSID lookup failed before delete',
+            error?.stderr || error?.message || error,
+          )
+        }
+
+        if (profileSsid && activeSsid && profileSsid === activeSsid) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          return res.end(JSON.stringify({ success: false, error: 'CONNECTED_PROFILE' }))
+        }
+
+        console.log('[WIFI] Deleting known profile', profileId)
+        const { stderr } = await execCommand('nmcli', ['connection', 'delete', 'id', profileId])
+
+        if (stderr && String(stderr).trim()) {
+          console.warn('[WIFI] delete known profile stderr', String(stderr).trim())
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: true }))
+      } catch (e) {
+        console.error('[WIFI] delete known profile failed', e?.stderr || e?.message || e)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ success: false, error: 'DELETE_FAILED' }))
       }
     })
 
@@ -3981,7 +4168,12 @@ const server = http.createServer((req, res) => {
       let direction = 'up'
       try {
         const payload = body ? JSON.parse(body) : {}
-        direction = String(payload.direction || 'up').trim().toLowerCase() === 'down' ? 'down' : 'up'
+        direction =
+          String(payload.direction || 'up')
+            .trim()
+            .toLowerCase() === 'down'
+            ? 'down'
+            : 'up'
       } catch {
         // Ignore invalid body and keep the default direction.
       }
@@ -4483,14 +4675,24 @@ function readWifiSignal() {
       return
     }
 
-    exec(
-      'nmcli -t --escape no -f ACTIVE,SSID,SIGNAL dev wifi list --rescan no',
-      (err2, stdout2) => {
+    ;(async () => {
+      try {
+        const { stdout: stdout2 } = await execCommand('nmcli', [
+          '-t',
+          '--escape',
+          'no',
+          '-f',
+          'ACTIVE,SSID,SIGNAL',
+          'dev',
+          'wifi',
+          'list',
+          '--rescan',
+          'no',
+        ])
+
         wifiReading = false
 
-        if (err2 || !stdout2) return
-
-        const activeLine = stdout2
+        const activeLine = String(stdout2 || '')
           .trim()
           .split('\n')
           .find(line => line.startsWith('yes:'))
@@ -4512,8 +4714,11 @@ function readWifiSignal() {
           signal: Number.isFinite(signal) ? signal : null,
           ssid,
         })
-      },
-    )
+      } catch (error) {
+        wifiReading = false
+        console.error('[WIFI] status read failed', error?.stderr || error?.message || error)
+      }
+    })()
   })
 }
 

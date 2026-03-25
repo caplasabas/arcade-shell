@@ -8,9 +8,16 @@ type Props = {
   disabled: boolean
   adminDisabled?: boolean
   focused: boolean
+  canAfford?: boolean
 }
 
-export function GameTile({ game, disabled, adminDisabled = false, focused }: Props) {
+export function GameTile({
+  game,
+  disabled,
+  adminDisabled = false,
+  focused,
+  canAfford = false,
+}: Props) {
   const [retryCount, setRetryCount] = useState(0)
   const [imgSrc, setImgSrc] = useState(game.art)
   const priceLabel = game.type === 'casino' ? 'FREE' : `P${formatPeso(game.price, false, false)}`
@@ -52,14 +59,19 @@ export function GameTile({ game, disabled, adminDisabled = false, focused }: Pro
       <div className="title-band">
         <span className="label">{game.name}</span>
       </div>
-      <div className={['tile-price-badge', game.type, disabled ? 'disabled' : ''].join(' ').trim()}>
+      <div
+        className={[
+          'tile-price-badge',
+          game.type,
+          game.type === 'arcade' ? (canAfford ? 'affordable' : 'unaffordable') : '',
+          disabled ? 'disabled' : '',
+        ]
+          .join(' ')
+          .trim()}
+      >
         {priceLabel}
       </div>
-      {adminDisabled ? (
-        <div className="tile-status-badge">
-          Disabled
-        </div>
-      ) : null}
+      {adminDisabled ? <div className="tile-status-badge">Disabled</div> : null}
     </div>
   )
 }
