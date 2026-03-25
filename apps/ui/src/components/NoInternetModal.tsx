@@ -15,10 +15,11 @@ export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props
     const isConfirm = (button: string | number) =>
       button === 0 ||
       button === '0' ||
+      button === 1 ||
+      button === '1' ||
       button === 'A' ||
       button === 'START' ||
-      button === 1 ||
-      button === '1'
+      button === 'ENTER'
 
     const onArcadeInput = (event: Event) => {
       const customEvent = event as CustomEvent<{ button?: string | number }>
@@ -26,12 +27,14 @@ export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props
       if (button === undefined || button === null) return
 
       if (isConfirm(button)) {
+        event.preventDefault?.()
+        event.stopImmediatePropagation?.()
         onConnect()
       }
     }
 
-    window.addEventListener('ARCADE_MODAL_INPUT', onArcadeInput)
-    return () => window.removeEventListener('ARCADE_MODAL_INPUT', onArcadeInput)
+    window.addEventListener('ARCADE_MODAL_INPUT', onArcadeInput, true)
+    return () => window.removeEventListener('ARCADE_MODAL_INPUT', onArcadeInput, true)
   }, [onConnect])
 
   return (

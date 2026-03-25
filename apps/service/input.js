@@ -2335,6 +2335,9 @@ function startEventDevice(path, label) {
 }
 
 function handleRawEvent(source, type, code, value) {
+  if (retroarchActive && (source === 'P1' || source === 'P2') && type === EV_KEY) {
+    console.log('[RETRO RAW KEY]', { source, code, mappedIndex: resolveKeyName(code), value })
+  }
   if (type === EV_KEY) {
     const index = resolveKeyName(code)
     if (index === null) return

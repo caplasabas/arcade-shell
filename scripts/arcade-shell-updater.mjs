@@ -102,7 +102,9 @@ function isNetworkError(error) {
 }
 
 function isUnmanagedLocalBuild(version) {
-  const value = String(version || '').trim().toLowerCase()
+  const value = String(version || '')
+    .trim()
+    .toLowerCase()
   if (!value) return false
   if (value.includes('dirty')) return true
   return /^[0-9a-f]{7,}$/.test(value)
@@ -145,7 +147,10 @@ async function downloadToFile(url, destination, timeoutMs) {
   }
 }
 
-function requestJsonWithCurl(url, { method = 'GET', headers = {}, body = null, timeoutMs = 12000 } = {}) {
+function requestJsonWithCurl(
+  url,
+  { method = 'GET', headers = {}, body = null, timeoutMs = 12000 } = {},
+) {
   const args = [
     '-sS',
     '-L',
@@ -406,7 +411,8 @@ function getRomManifestEntries(manifest, supabaseUrl, bucket) {
 
       const displayName = String(raw?.title || raw?.label || raw?.display_name || '').trim()
       const checksum = String(raw?.sha256 || raw?.checksum || '').trim()
-      const url = String(raw?.url || '').trim() || toPublicStorageUrl(supabaseUrl, bucket, relativePath)
+      const url =
+        String(raw?.url || '').trim() || toPublicStorageUrl(supabaseUrl, bucket, relativePath)
 
       return {
         index,
@@ -524,7 +530,13 @@ async function syncPublicRoms({ supabaseUrl, installDir, networkTimeoutMs }) {
 
   if (entries.length === 0) {
     console.log('[arcade-shell-updater] ROM manifest is empty; nothing to sync')
-    emitStatus({ phase: 'roms-complete', label: 'Games ready', detail: null, completed: 0, total: 0 })
+    emitStatus({
+      phase: 'roms-complete',
+      label: 'Games ready',
+      detail: null,
+      completed: 0,
+      total: 0,
+    })
     return
   }
 
@@ -591,7 +603,8 @@ async function maybeInstallShellUpdate({
   versionFile,
   systemdTarget,
   updaterDest,
-  networkTimeoutMs,
+  metadataTimeoutMs,
+  packageDownloadTimeoutMs,
 }) {
   const bucket = process.env.SUPABASE_STORAGE_BUCKET || 'game-packages'
   const metadataPath = process.env.ARCADE_SHELL_METADATA_PATH || 'arcade-shell/latest.json'
@@ -601,14 +614,14 @@ async function maybeInstallShellUpdate({
 
   emitStatus({ phase: 'shell-check', label: 'Checking for updates', detail: null })
   console.log(
-    `[arcade-shell-updater] fetching metadata from ${metadataUrl} (timeout ${networkTimeoutMs}ms)`,
+    `[arcade-shell-updater] fetching metadata from ${metadataUrl} (timeout ${metadataTimeoutMs}ms)`,
   )
 
   let metadataResponse
   try {
     metadataResponse = requestJsonWithCurl(metadataUrl, {
       headers: { 'Cache-Control': 'no-cache' },
-      timeoutMs: networkTimeoutMs,
+      timeoutMs: metadataTimeoutMs,
     })
   } catch (error) {
     if (isNetworkError(error)) {
@@ -671,7 +684,7 @@ async function maybeInstallShellUpdate({
   const encPath = path.join(downloadDir, tarballName)
 
   try {
-    await downloadToFile(packageUrl, encPath, networkTimeoutMs)
+    await downloadToFile(packageUrl, encPath, packageDownloadTimeoutMs)
   } catch (error) {
     if (isNetworkError(error)) {
       console.log(
@@ -756,7 +769,17 @@ async function maybeBuildRemoteHelper(installDir) {
 
   if (await fileExists(overlaySource)) {
     console.log('[arcade-shell-updater] building native retro overlay')
-    run(compiler, ['-O2', '-s', '-Wall', '-Wextra', '-o', overlayTarget, overlaySource, '-lX11', '-lXext'])
+    run(compiler, [
+      '-O2',
+      '-s',
+      '-Wall',
+      '-Wextra',
+      '-o',
+      overlayTarget,
+      overlaySource,
+      '-lX11',
+      '-lXext',
+    ])
     await fsp.chmod(overlayTarget, 0o755)
   }
 }
@@ -794,10 +817,17 @@ async function main() {
   const systemdTarget = process.env.ARCADE_SHELL_SYSTEMD_DIR || '/etc/systemd/system'
   const updaterDest =
     process.env.ARCADE_SHELL_UPDATER_DEST || '/usr/local/bin/arcade-shell-updater.mjs'
-  const networkTimeoutMs = Math.max(
+  const metadataTimeoutMs = Math.max(
     1000,
-    Number.parseInt(process.env.ARCADE_SHELL_NETWORK_TIMEOUT_MS || '12000', 10) || 12000,
+    Number.parseInt(process.env.ARCADE_SHELL_METADATA_TIMEOUT_MS || '4000', 10) || 4000,
   )
+
+  const packageDownloadTimeoutMs = Math.max(
+    5000,
+    Number.parseInt(process.env.ARCADE_SHELL_PACKAGE_TIMEOUT_MS || '30000', 10) || 30000,
+  )
+
+  const networkTimeoutMs = metadataTimeoutMs
   const rebootOnUpdate = String(process.env.ARCADE_SHELL_REBOOT_ON_UPDATE || '0') === '1'
   const serviceNames = String(
     process.env.ARCADE_SHELL_SERVICES ||
@@ -812,7 +842,8 @@ async function main() {
     versionFile,
     systemdTarget,
     updaterDest,
-    networkTimeoutMs,
+    metadataTimeoutMs,
+    packageDownloadTimeoutMs,
   })
   const helpersRepaired = await maybeRepairNativeHelpers(installDir)
 

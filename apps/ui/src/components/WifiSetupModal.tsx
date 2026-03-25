@@ -683,33 +683,6 @@ export function WifiSetupModal({
             <span>A: Enter / B: Back / SELECT: Delete saved network</span>
           </div>
 
-          {focusMode === 'keyboard' && (
-            <>
-              <div className="modal-row" style={{ marginTop: 14 }}>
-                <span>Password for {selectedNewNetwork?.ssid || 'network'}</span>
-              </div>
-              <input type={showPassword ? 'text' : 'password'} value={password} readOnly />
-              <div className="virtual-keyboard" aria-label="Virtual keyboard">
-                {KEYBOARD_LAYOUT.map((row, rowIndex) => (
-                  <div key={rowIndex} className="virtual-keyboard-row">
-                    {row.map((key, colIndex) => (
-                      <button
-                        key={`${rowIndex}-${colIndex}-${key.label}`}
-                        type="button"
-                        className={[
-                          'virtual-key',
-                          rowIndex === keyboardRow && colIndex === keyboardCol ? 'active' : '',
-                        ].join(' ')}
-                      >
-                        {key.label}
-                      </button>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-
           {statusMessage && <div style={{ marginTop: 16, color: '#D0D5DD' }}>{statusMessage}</div>}
           {error && <div style={{ marginTop: 16, color: '#EDA29B' }}>{error}</div>}
         </div>
@@ -742,6 +715,58 @@ export function WifiSetupModal({
                 Are you sure you want to delete <strong>{deleteConfirmProfile.ssid}</strong>?
               </div>
               <div style={{ marginTop: 14, color: '#D0D5DD' }}>A: Confirm &nbsp; B: Cancel</div>
+            </div>
+          </div>
+        )}
+        {focusMode === 'keyboard' && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'rgba(0, 0, 0, 0.55)',
+              borderRadius: 16,
+              zIndex: 4,
+              padding: 16,
+            }}
+          >
+            <div
+              style={{
+                width: 'min(760px, calc(100% - 24px))',
+                maxHeight: 'calc(100% - 24px)',
+                overflowY: 'auto',
+                padding: 18,
+                borderRadius: 14,
+                background: 'rgba(17, 24, 39, 0.97)',
+                border: '1px solid rgba(255,255,255,0.14)',
+                color: '#fff',
+              }}
+            >
+              <div className="modal-row" style={{ marginTop: 0 }}>
+                <span>Password for {selectedNewNetwork?.ssid || 'network'}</span>
+              </div>
+              <input type={showPassword ? 'text' : 'password'} value={password} readOnly />
+              <div className="virtual-keyboard" aria-label="Virtual keyboard">
+                {KEYBOARD_LAYOUT.map((row, rowIndex) => (
+                  <div key={rowIndex} className="virtual-keyboard-row">
+                    {row.map((key, colIndex) => (
+                      <button
+                        key={`${rowIndex}-${colIndex}-${key.label}`}
+                        type="button"
+                        className={[
+                          'virtual-key',
+                          rowIndex === keyboardRow && colIndex === keyboardCol ? 'active' : '',
+                        ].join(' ')}
+                      >
+                        {key.label}
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 12, color: '#D0D5DD' }}>A: Select key &nbsp; B: Back</div>
             </div>
           </div>
         )}
