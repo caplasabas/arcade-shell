@@ -28,10 +28,10 @@ type Section = 'known' | 'new' | 'refresh'
 type VirtualKey = {
   label: string
   value?: string
-  action: 'char' | 'space' | 'backspace' | 'clear' | 'toggle' | 'submit'
+  action: 'char' | 'space' | 'backspace' | 'clear' | 'toggle' | 'shift' | 'submit'
 }
 
-const KEYBOARD_LAYOUT: VirtualKey[][] = [
+const KEYBOARD_LAYOUT_BASE: VirtualKey[][] = [
   [
     { label: '1', action: 'char', value: '1' },
     { label: '2', action: 'char', value: '2' },
@@ -45,36 +45,37 @@ const KEYBOARD_LAYOUT: VirtualKey[][] = [
     { label: '0', action: 'char', value: '0' },
   ],
   [
-    { label: 'Q', action: 'char', value: 'q' },
-    { label: 'W', action: 'char', value: 'w' },
-    { label: 'E', action: 'char', value: 'e' },
-    { label: 'R', action: 'char', value: 'r' },
-    { label: 'T', action: 'char', value: 't' },
-    { label: 'Y', action: 'char', value: 'y' },
-    { label: 'U', action: 'char', value: 'u' },
-    { label: 'I', action: 'char', value: 'i' },
-    { label: 'O', action: 'char', value: 'o' },
-    { label: 'P', action: 'char', value: 'p' },
+    { label: 'q', action: 'char', value: 'q' },
+    { label: 'w', action: 'char', value: 'w' },
+    { label: 'e', action: 'char', value: 'e' },
+    { label: 'r', action: 'char', value: 'r' },
+    { label: 't', action: 'char', value: 't' },
+    { label: 'y', action: 'char', value: 'y' },
+    { label: 'u', action: 'char', value: 'u' },
+    { label: 'i', action: 'char', value: 'i' },
+    { label: 'o', action: 'char', value: 'o' },
+    { label: 'p', action: 'char', value: 'p' },
   ],
   [
-    { label: 'A', action: 'char', value: 'a' },
-    { label: 'S', action: 'char', value: 's' },
-    { label: 'D', action: 'char', value: 'd' },
-    { label: 'F', action: 'char', value: 'f' },
-    { label: 'G', action: 'char', value: 'g' },
-    { label: 'H', action: 'char', value: 'h' },
-    { label: 'J', action: 'char', value: 'j' },
-    { label: 'K', action: 'char', value: 'k' },
-    { label: 'L', action: 'char', value: 'l' },
+    { label: 'a', action: 'char', value: 'a' },
+    { label: 's', action: 'char', value: 's' },
+    { label: 'd', action: 'char', value: 'd' },
+    { label: 'f', action: 'char', value: 'f' },
+    { label: 'g', action: 'char', value: 'g' },
+    { label: 'h', action: 'char', value: 'h' },
+    { label: 'j', action: 'char', value: 'j' },
+    { label: 'k', action: 'char', value: 'k' },
+    { label: 'l', action: 'char', value: 'l' },
   ],
   [
-    { label: 'Z', action: 'char', value: 'z' },
-    { label: 'X', action: 'char', value: 'x' },
-    { label: 'C', action: 'char', value: 'c' },
-    { label: 'V', action: 'char', value: 'v' },
-    { label: 'B', action: 'char', value: 'b' },
-    { label: 'N', action: 'char', value: 'n' },
-    { label: 'M', action: 'char', value: 'm' },
+    { label: 'Shift', action: 'shift' },
+    { label: 'z', action: 'char', value: 'z' },
+    { label: 'x', action: 'char', value: 'x' },
+    { label: 'c', action: 'char', value: 'c' },
+    { label: 'v', action: 'char', value: 'v' },
+    { label: 'b', action: 'char', value: 'b' },
+    { label: 'n', action: 'char', value: 'n' },
+    { label: 'm', action: 'char', value: 'm' },
   ],
   [
     { label: 'Space', action: 'space' },
@@ -104,6 +105,7 @@ export function WifiSetupModal({
   const [keyboardCol, setKeyboardCol] = useState(0)
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [keyboardUppercase, setKeyboardUppercase] = useState(false)
   const [loading, setLoading] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -111,6 +113,7 @@ export function WifiSetupModal({
   const [deleteConfirmProfile, setDeleteConfirmProfile] = useState<KnownProfile | null>(null)
   const knownItemRefs = useRef<Array<HTMLButtonElement | null>>([])
   const newItemRefs = useRef<Array<HTMLButtonElement | null>>([])
+  const keyboardPositionRef = useRef({ row: 0, col: 0 })
 
   const clampIndex = (value: number, length: number) => {
     if (length <= 0) return 0
@@ -148,6 +151,24 @@ export function WifiSetupModal({
   )
 
   const selectedNewNetwork = otherNetworks[newIndex] ?? null
+  const keyboardLayout = useMemo(
+    () =>
+      KEYBOARD_LAYOUT_BASE.map(row =>
+        row.map(key => {
+          if (key.action !== 'char' || !key.value || !/^[a-z]$/i.test(key.value)) {
+            return key
+          }
+
+          const nextValue = keyboardUppercase ? key.value.toUpperCase() : key.value.toLowerCase()
+          return {
+            ...key,
+            label: nextValue,
+            value: nextValue,
+          }
+        }),
+      ),
+    [keyboardUppercase],
+  )
 
   const refresh = useCallback(async () => {
     setScanning(true)
@@ -220,6 +241,13 @@ export function WifiSetupModal({
     if (focusMode !== 'new-list') return
     newItemRefs.current[newIndex]?.scrollIntoView({ block: 'nearest' })
   }, [focusMode, newIndex])
+
+  useEffect(() => {
+    keyboardPositionRef.current = {
+      row: keyboardRow,
+      col: keyboardCol,
+    }
+  }, [keyboardCol, keyboardRow])
 
   const connectKnown = useCallback(
     async (profile: KnownProfile | null) => {
@@ -305,6 +333,10 @@ export function WifiSetupModal({
       }
       if (key.action === 'toggle') {
         setShowPassword(prev => !prev)
+        return
+      }
+      if (key.action === 'shift') {
+        setKeyboardUppercase(prev => !prev)
         return
       }
       if (key.action === 'submit') {
@@ -421,19 +453,21 @@ export function WifiSetupModal({
       }
       setPassword('')
       setShowPassword(false)
+      setKeyboardUppercase(false)
       setKeyboardRow(0)
       setKeyboardCol(0)
       setFocusMode('keyboard')
       return
     }
 
-    const key = KEYBOARD_LAYOUT[keyboardRow]?.[keyboardCol]
+    const key = keyboardLayout[keyboardRow]?.[keyboardCol]
     if (key) applyKey(key)
   }, [
     applyKey,
     connectKnown,
     focusMode,
     handleManualRefresh,
+    keyboardLayout,
     keyboardCol,
     keyboardRow,
     knownIndex,
@@ -490,16 +524,15 @@ export function WifiSetupModal({
         return
       }
 
-      setKeyboardRow(prevRow => {
-        const nextRow = Math.max(0, Math.min(KEYBOARD_LAYOUT.length - 1, prevRow + deltaRow))
-        setKeyboardCol(prevCol => {
-          const maxCol = KEYBOARD_LAYOUT[nextRow].length - 1
-          return Math.max(0, Math.min(maxCol, prevCol + deltaCol))
-        })
-        return nextRow
-      })
+      const { row: currentRow, col: currentCol } = keyboardPositionRef.current
+      const nextRow = Math.max(0, Math.min(keyboardLayout.length - 1, currentRow + deltaRow))
+      const maxCol = keyboardLayout[nextRow].length - 1
+      const nextCol = Math.max(0, Math.min(maxCol, currentCol + deltaCol))
+
+      setKeyboardRow(nextRow)
+      setKeyboardCol(nextCol)
     },
-    [deleteConfirmProfile, focusMode, loading, section],
+    [deleteConfirmProfile, focusMode, keyboardLayout, loading, section],
   )
 
   useEffect(() => {
@@ -694,6 +727,7 @@ export function WifiSetupModal({
                       setFocusMode('keyboard')
                       setPassword('')
                       setShowPassword(false)
+                      setKeyboardUppercase(false)
                       setKeyboardRow(0)
                       setKeyboardCol(0)
                     }}
@@ -791,7 +825,7 @@ export function WifiSetupModal({
               </div>
               <input type={showPassword ? 'text' : 'password'} value={password} readOnly />
               <div className="virtual-keyboard" aria-label="Virtual keyboard">
-                {KEYBOARD_LAYOUT.map((row, rowIndex) => (
+                {keyboardLayout.map((row, rowIndex) => (
                   <div key={rowIndex} className="virtual-keyboard-row">
                     {row.map((key, colIndex) => (
                       <button
@@ -799,6 +833,7 @@ export function WifiSetupModal({
                         type="button"
                         className={[
                           'virtual-key',
+                          key.action === 'shift' && keyboardUppercase ? 'toggled' : '',
                           rowIndex === keyboardRow && colIndex === keyboardCol ? 'active' : '',
                         ].join(' ')}
                       >
@@ -808,7 +843,9 @@ export function WifiSetupModal({
                   </div>
                 ))}
               </div>
-              <div style={{ marginTop: 12, color: '#D0D5DD' }}>A: Select key &nbsp; B: Back</div>
+              <div style={{ marginTop: 12, color: '#D0D5DD' }}>
+                A: Select key &nbsp; B: Back &nbsp; Shift: {keyboardUppercase ? 'ABC' : 'abc'}
+              </div>
             </div>
           </div>
         )}

@@ -927,6 +927,12 @@ button:focus-visible {
     color: #ffd84d;
 }
 
+.virtual-key.toggled {
+    border-color: #d9f99d;
+    box-shadow: 0 0 0 2px rgba(217, 249, 157, 0.18);
+    color: #d9f99d;
+}
+
 .modal-body input:focus,
 .modal-network-picker:focus,
 .modal-actions button:focus {
