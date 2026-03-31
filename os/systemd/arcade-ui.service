@@ -6,7 +6,6 @@ Requires=arcade-input.service
 [Service]
 User=arcade1
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/arcade1/.Xauthority
 
 TTYPath=/dev/tty2
 StandardInput=tty
@@ -18,7 +17,8 @@ TTYVTDisallocate=yes
 
 PermissionsStartOnly=true
 ExecStartPre=/opt/arcade/os/bin/arcade-audio-init.sh
-ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp
+ExecStartPre=/usr/bin/rm -f /home/arcade1/.Xauthority-c /home/arcade1/.Xauthority-l
+ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp -ac
 Restart=always
 RestartSec=2
 

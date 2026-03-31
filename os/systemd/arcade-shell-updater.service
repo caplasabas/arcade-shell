@@ -13,7 +13,12 @@ Environment=ARCADE_SHELL_VERSION_FILE=/opt/arcade/os/.arcade-shell-version
 Environment=ARCADE_SHELL_UPDATER_DEST=/usr/local/bin/arcade-shell-updater.mjs
 Environment=ARCADE_SHELL_SYSTEMD_DIR=/etc/systemd/system
 Environment=ARCADE_SHELL_NETWORK_TIMEOUT_MS=20000
+Environment=ARCADE_SHELL_AUTO_UPDATE=1
 Environment=ARCADE_SHELL_REBOOT_ON_UPDATE=0
+Environment=ARCADE_SHELL_START_DELAY_MS=45000
+Environment=ARCADE_SHELL_IDLE_WAIT_MS=180000
+Environment=ARCADE_SHELL_IDLE_POLL_MS=5000
+Environment=ARCADE_SHELL_IDLE_CHECK_URL=http://127.0.0.1:5174/arcade-life/overlay-state
 Environment=ARCADE_SHELL_SERVICES=arcade-input.service,arcade-ui.service,arcade-watchdog.service
 Environment=SUPABASE_URL=https://rrdnfvbyfjvowiqpgsax.supabase.co
 Environment=SUPABASE_SERVICE_ROLE_KEY=sb_secret_AjqnokH2mHl_BenbbVHIEQ_zWzqNVWS

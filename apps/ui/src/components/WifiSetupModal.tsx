@@ -555,6 +555,48 @@ export function WifiSetupModal({
     return () => window.removeEventListener('ARCADE_MODAL_INPUT', onInput)
   }, [handleBack, handleEnter, move, requestDeleteKnownProfile])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (loading) return
+
+      switch (event.key) {
+        case 'ArrowUp':
+          event.preventDefault()
+          move(-1, 0)
+          return
+        case 'ArrowDown':
+          event.preventDefault()
+          move(1, 0)
+          return
+        case 'ArrowLeft':
+          event.preventDefault()
+          move(0, -1)
+          return
+        case 'ArrowRight':
+          event.preventDefault()
+          move(0, 1)
+          return
+        case 'Enter':
+          event.preventDefault()
+          handleEnter()
+          return
+        case 'Escape':
+          event.preventDefault()
+          handleBack()
+          return
+        case 'Backspace':
+          if (focusMode === 'keyboard') {
+            event.preventDefault()
+            setPassword(prev => prev.slice(0, -1))
+          }
+          return
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [focusMode, handleBack, handleEnter, loading, move])
+
   return (
     <div
       className="modal-backdrop"

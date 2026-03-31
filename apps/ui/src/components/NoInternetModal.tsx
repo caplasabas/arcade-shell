@@ -4,9 +4,15 @@ type Props = {
   onConnect: () => void
   currentSsid?: string | null
   wifiConnected?: boolean
+  elevated?: boolean
 }
 
-export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props) {
+export function NoInternetModal({
+  onConnect,
+  currentSsid,
+  wifiConnected,
+  elevated = false,
+}: Props) {
   const connectButtonRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
@@ -15,11 +21,7 @@ export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props
     const isConfirm = (button: string | number) =>
       button === 0 ||
       button === '0' ||
-      button === 1 ||
-      button === '1' ||
-      button === 'A' ||
-      button === 'START' ||
-      button === 'ENTER'
+      button === 'A'
 
     const onArcadeInput = (event: Event) => {
       const customEvent = event as CustomEvent<{ button?: string | number }>
@@ -39,7 +41,7 @@ export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props
 
   return (
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop${elevated ? ' modal-backdrop-elevated' : ''}`}
       role="dialog"
       aria-modal="true"
       aria-labelledby="no-internet-title"
@@ -68,7 +70,7 @@ export function NoInternetModal({ onConnect, currentSsid, wifiConnected }: Props
 
         <div className="modal-actions">
           <button ref={connectButtonRef} className="modal-confirm" onClick={onConnect}>
-            Connect
+            Settings
           </button>
         </div>
       </div>

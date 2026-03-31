@@ -58,11 +58,45 @@ export async function ensureDeviceRegistered(name?: string) {
 
   if (!deviceId) throw new Error('Device not registered')
 
-  const { error } = await supabase
+  const nextName = String(name ?? '').trim()
+  const { data: existing, error: lookupError } = await supabase
     .from('devices')
-    .upsert({ device_id: deviceId, name: name ?? null }, { onConflict: 'device_id' })
+    .select('device_id,name')
+    .eq('device_id', deviceId)
+    .maybeSingle()
+
+  if (lookupError) throw lookupError
+
+  const payload =
+    existing && existing.device_id
+      ? { device_id: deviceId }
+      : nextName
+        ? { device_id: deviceId, name: nextName }
+        : { device_id: deviceId }
+
+  const { error } = await supabase.from('devices').upsert(payload, { onConflict: 'device_id' })
 
   if (error) throw error
 
   return deviceId
+}
+
+export async function clearDeviceRuntimeState(deviceId: string) {
+  const clearedAt = new Date().toISOString()
+  const { error } = await supabase
+    .from('devices')
+    .update({
+      balance: 0,
+      coins_in_total: 0,
+      hopper_in_total: 0,
+      hopper_out_total: 0,
+      bet_total: 0,
+      win_total: 0,
+      withdraw_total: 0,
+      spins_total: 0,
+      updated_at: clearedAt,
+    })
+    .eq('device_id', deviceId)
+
+  if (error) throw error
 }

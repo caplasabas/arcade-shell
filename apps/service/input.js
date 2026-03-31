@@ -28,6 +28,7 @@ const DEFAULT_RUNTIME_DIR =
 
 const RUNTIME_GAMES_DIR = process.env.ARCADE_RUNTIME_GAMES_DIR || DEFAULT_RUNTIME_DIR
 const IS_LINUX = process.platform === 'linux'
+const IS_MACOS = process.platform === 'darwin'
 const FORCE_PI_MODE = process.env.ARCADE_FORCE_PI === '1'
 const PI_MODEL_PATH = '/sys/firmware/devicetree/base/model'
 const IS_PI =
@@ -41,6 +42,7 @@ const IS_PI =
         return false
       }
     })())
+const DEV_INPUT_BYPASS_ENABLED = !IS_PI && IS_MACOS
 // ============================
 // CONFIG
 // ============================
@@ -116,6 +118,7 @@ let hopperTimeout = null
 let hopperGpioProcess = null
 let hopperNoPulseTimeout = null
 let hopperLastPulseAt = 0
+let activeWithdrawalContext = null
 
 let serverInstance = null
 
@@ -147,6 +150,30 @@ let arcadeShellUpdateState = {
   message: '',
   reason: null,
   exitCode: null,
+}
+let arcadeBalancePushFloor = null
+let arcadeBalancePushFloorUntil = 0
+
+function noteArcadeBalancePush(nextBalance) {
+  if (!Number.isFinite(nextBalance)) return
+  arcadeBalancePushFloor = toMoney(nextBalance, 0)
+  arcadeBalancePushFloorUntil = Date.now() + 8000
+}
+
+function clearArcadeBalancePushFloor() {
+  arcadeBalancePushFloor = null
+  arcadeBalancePushFloorUntil = 0
+}
+
+function shouldDeferArcadeBalanceSync(nextBalance) {
+  if (!Number.isFinite(nextBalance)) return false
+  if (!Number.isFinite(arcadeBalancePushFloor)) return false
+  if (Date.now() > arcadeBalancePushFloorUntil) {
+    clearArcadeBalancePushFloor()
+    return false
+  }
+
+  return nextBalance < arcadeBalancePushFloor
 }
 
 function execFileAsync(file, args, options = {}) {
@@ -459,6 +486,15 @@ function ensureRetroXWarm(reason = 'boot') {
   proc.unref()
   retroXWarmRequested = true
   console.log(`[RETRO-X] warm start requested (${reason})`)
+
+  if (reason === 'boot') {
+    // Boot starts the prewarmed RetroArch X server on tty1. Force the cabinet back
+    // to the menu VT after that warm-up so the user lands on the UI instead.
+    setTimeout(() => {
+      switchToVTWithRetry(getTargetUiVT(), 'boot-ui')
+      setTimeout(() => switchToVTWithRetry(getTargetUiVT(), 'boot-ui-post'), 250)
+    }, 8000)
+  }
 }
 
 function startSplashForRetroarch() {
@@ -706,6 +742,208 @@ function toMoney(value, fallback = 0) {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) return fallback
   return Math.max(0, Math.round(parsed * 100) / 100)
+}
+
+async function fetchDeviceFinancialState(deviceId = DEVICE_ID) {
+  if (!hasSupabaseRpcConfig()) return null
+
+  const safeDeviceId = String(deviceId || '').trim()
+  if (!safeDeviceId) return null
+
+  const url =
+    `${SUPABASE_URL}/rest/v1/devices?` +
+    `select=device_id,balance,hopper_balance&device_id=eq.${encodeURIComponent(safeDeviceId)}&limit=1`
+
+  const response = await requestJsonWithCurl(url, {
+    method: 'GET',
+    headers: getSupabaseHeaders(),
+    timeoutMs: 2500,
+  })
+
+  if (!response.ok) {
+    throw new Error(`device state fetch failed (${response.status})`)
+  }
+
+  const rows = response.json()
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row) {
+    return {
+      deviceId: safeDeviceId,
+      balance: 0,
+      hopperBalance: 0,
+    }
+  }
+
+  return {
+    deviceId: String(row.device_id || safeDeviceId),
+    balance: toMoney(row.balance, 0),
+    hopperBalance: toMoney(row.hopper_balance, 0),
+  }
+}
+
+function getMaxWithdrawalAmountForHopperBalance(hopperBalance) {
+  const safeHopperBalance = toMoney(hopperBalance, 0)
+
+  if (safeHopperBalance <= 0) return 0
+  if (safeHopperBalance <= 300) return 60
+  if (safeHopperBalance <= 500) return 100
+  if (safeHopperBalance <= 1000) return 300
+  if (safeHopperBalance <= 1500) return 500
+  return 1000
+}
+
+async function recordWithdrawalDispense(amount) {
+  const dispenseAmount = toMoney(amount, 0)
+  if (dispenseAmount <= 0 || !hasSupabaseRpcConfig()) return
+
+  const context = activeWithdrawalContext
+  const requestId = context?.requestId || `withdraw-${Date.now()}`
+  const requestedAmount = toMoney(context?.requestedAmount, dispenseAmount)
+  const nextDispensedTotal = toMoney((context?.dispensedTotal || 0) + dispenseAmount, dispenseAmount)
+
+  if (context) {
+    context.dispensedTotal = nextDispensedTotal
+  }
+
+  const eventTs = new Date().toISOString()
+  const metadata = {
+    source: 'hopper',
+    request_id: requestId,
+    requested_amount: requestedAmount,
+    dispensed_total: nextDispensedTotal,
+  }
+
+  try {
+    const metricResponse = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`, {
+      method: 'POST',
+      headers: getSupabaseHeaders(),
+      timeoutMs: 3500,
+      body: {
+        p_device_id: DEVICE_ID,
+        p_event_type: 'withdrawal',
+        p_amount: dispenseAmount,
+        p_event_ts: eventTs,
+        p_metadata: metadata,
+        p_write_ledger: true,
+      },
+    })
+
+    if (!metricResponse.ok) {
+      throw new Error(`metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim())
+    }
+
+    const ledgerResponse = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/device_ledger`, {
+      method: 'POST',
+      headers: {
+        ...getSupabaseHeaders(),
+        Prefer: 'return=minimal',
+      },
+      timeoutMs: 3500,
+      body: {
+        device_id: DEVICE_ID,
+        type: 'withdrawal',
+        amount: dispenseAmount,
+        balance_delta: -dispenseAmount,
+        source: 'hopper',
+        metadata,
+      },
+    })
+
+    if (!ledgerResponse.ok) {
+      throw new Error(
+        `ledger insert failed (${ledgerResponse.status}) ${ledgerResponse.text || ''}`.trim(),
+      )
+    }
+  } catch (error) {
+    console.error('[WITHDRAW] dispense accounting failed', {
+      amount: dispenseAmount,
+      requestId,
+      error: error?.message || error,
+    })
+  }
+}
+
+async function recordHopperTopup(amount) {
+  const topupAmount = toMoney(amount, 0)
+  if (topupAmount <= 0 || !hasSupabaseRpcConfig()) return
+
+  const eventTs = new Date().toISOString()
+  const metadata = {
+    source: 'hopper_topup_slot',
+  }
+
+  try {
+    const metricResponse = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`, {
+      method: 'POST',
+      headers: getSupabaseHeaders(),
+      timeoutMs: 3500,
+      body: {
+        p_device_id: DEVICE_ID,
+        p_event_type: 'hopper_in',
+        p_amount: topupAmount,
+        p_event_ts: eventTs,
+        p_metadata: metadata,
+        p_write_ledger: true,
+      },
+    })
+
+    if (!metricResponse.ok) {
+      throw new Error(`metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim())
+    }
+  } catch (error) {
+    console.error('[HOPPER] topup accounting failed', {
+      amount: topupAmount,
+      error: error?.message || error,
+    })
+  }
+}
+
+async function validateWithdrawRequest(amount) {
+  const requestedAmount = toMoney(amount, 0)
+  if (requestedAmount <= 0) {
+    return { ok: false, status: 400, error: 'Invalid withdraw amount' }
+  }
+
+  if (hopperActive) {
+    return { ok: false, status: 409, error: 'Withdrawal already in progress' }
+  }
+
+  if (!IS_PI || !hasSupabaseRpcConfig()) {
+    return { ok: true, amount: requestedAmount }
+  }
+
+  const state = await fetchDeviceFinancialState(DEVICE_ID)
+  const balance = toMoney(state?.balance, 0)
+  const hopperBalance = toMoney(state?.hopperBalance, 0)
+  const hopperCap = getMaxWithdrawalAmountForHopperBalance(hopperBalance)
+  const maxWithdrawalAmount = Math.max(0, Math.min(balance, hopperBalance, hopperCap))
+
+  if (balance < requestedAmount) {
+    return { ok: false, status: 409, error: 'Insufficient balance' }
+  }
+
+  if (hopperBalance < requestedAmount) {
+    return { ok: false, status: 409, error: 'Insufficient hopper balance' }
+  }
+
+  if (requestedAmount > maxWithdrawalAmount) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Max withdrawal amount is ${formatPeso(maxWithdrawalAmount)}`,
+      balance,
+      hopperBalance,
+      maxWithdrawalAmount,
+    }
+  }
+
+  return {
+    ok: true,
+    amount: requestedAmount,
+    balance,
+    hopperBalance,
+    maxWithdrawalAmount,
+  }
 }
 
 function formatPeso(
@@ -1333,9 +1571,21 @@ async function syncArcadeSessionBalance(options = {}) {
     const latestBalance = await fetchDeviceBalanceSnapshot()
     if (!arcadeSession?.active) return
     if (latestBalance === null || latestBalance === undefined) return
+    if (shouldDeferArcadeBalanceSync(latestBalance)) {
+      console.log('[ARCADE LIFE BALANCE] deferred stale sync', {
+        current: arcadeSession.lastKnownBalance,
+        next: latestBalance,
+        floor: arcadeBalancePushFloor,
+      })
+      return
+    }
 
     const previous = arcadeSession.lastKnownBalance
     arcadeSession.lastKnownBalance = latestBalance
+
+    if (Number.isFinite(arcadeBalancePushFloor) && latestBalance >= arcadeBalancePushFloor) {
+      clearArcadeBalancePushFloor()
+    }
 
     if (previous !== latestBalance) {
       console.log('[ARCADE LIFE BALANCE] applied', { previous, next: latestBalance })
@@ -1423,6 +1673,7 @@ function clearArcadeLifeSession(reason = 'ended') {
 
   const endedSession = arcadeSession
   arcadeSession = null
+  clearArcadeBalancePushFloor()
   clearArcadeBalanceSyncLoop()
   clearArcadePromptLoop()
   clearArcadeContinueCountdown()
@@ -1670,7 +1921,13 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
     .then(result => {
       if (!arcadeSession?.active || arcadeSession !== sessionRef) return
       sessionRef.purchaseInFlight[player] = false
-      sessionRef.lastKnownBalance = result.balance
+      const resolvedBalance = Number.isFinite(result.balance)
+        ? toMoney(result.balance, sessionRef.lastKnownBalance ?? 0)
+        : (sessionRef.lastKnownBalance ?? null)
+
+      if (resolvedBalance !== null) {
+        sessionRef.lastKnownBalance = resolvedBalance
+      }
 
       if (result.ok) {
         clearArcadeContinueCountdown(player)
@@ -1680,7 +1937,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
         scheduleArcadeCreditExpiry(player)
 
         const priceText = getArcadeSessionPrice().toFixed(2)
-        const balanceText = formatArcadeBalanceForOsd(result.balance)
+        const balanceText = formatArcadeBalanceForOsd(resolvedBalance)
 
         pulseVirtualKey(target, keyCode)
         setArcadeOverlayNotice(
@@ -1691,19 +1948,19 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
         showArcadeOsdMessage(
           composeArcadeOsdOverlay(
             `P${player.slice(1)} ${ARCADE_LIFE_PURCHASE_LABEL} Ok -P${priceText} Balance P${balanceText}`,
-            result.balance,
+            resolvedBalance,
           ),
         )
         broadcastArcadeLifeState('charged', {
           player,
           chargedAmount: result.chargedAmount,
-          balance: result.balance,
+          balance: resolvedBalance,
         })
         return
       }
 
       const priceText = getArcadeSessionPrice().toFixed(2)
-      const balanceText = formatArcadeBalanceForOsd(result.balance)
+      const balanceText = formatArcadeBalanceForOsd(resolvedBalance)
 
       if (
         String(result.reason || '')
@@ -1711,13 +1968,13 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
           .includes('offline')
       ) {
         setArcadeOverlayNotice(`OFFLINE`, 2200, 'center')
-        showArcadeOsdMessage(composeArcadeOsdOverlay(`OFFLINE`, result.balance))
+        showArcadeOsdMessage(composeArcadeOsdOverlay(`OFFLINE`, resolvedBalance))
       } else {
         setArcadeOverlayNotice(`INSUFFICIENT BALANCE`, 2200, 'center')
         showArcadeOsdMessage(
           composeArcadeOsdOverlay(
             `Insufficient Balance Needed P${priceText} Balance P${balanceText}`,
-            result.balance,
+            resolvedBalance,
           ),
         )
       }
@@ -1728,12 +1985,12 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
           startArcadeContinueCountdown(player)
         }, 1200)
       }
-      broadcastArcadeLifeState('denied', {
-        player,
-        denyReason: result.reason,
-        balance: result.balance,
-      })
+    broadcastArcadeLifeState('denied', {
+      player,
+      denyReason: result.reason,
+      balance: resolvedBalance,
     })
+  })
     .catch(err => {
       if (arcadeSession?.active && arcadeSession === sessionRef) {
         sessionRef.purchaseInFlight[player] = false
@@ -1818,6 +2075,13 @@ const HARD_MAX_MS = 90_000
 function startHopper(amount) {
   if (shuttingDown || hopperActive || amount <= 0) return
 
+  activeWithdrawalContext = {
+    requestId: `withdraw-${Date.now()}`,
+    requestedAmount: toMoney(amount, 0),
+    dispensedTotal: 0,
+    startedAt: Date.now(),
+  }
+
   if (!IS_PI) {
     console.log('[HOPPER] compat-mode simulated payout target=', amount)
     const totalPulses = Math.max(0, Math.ceil(amount / 20))
@@ -1829,6 +2093,7 @@ function startHopper(amount) {
           type: 'WITHDRAW_COMPLETE',
           dispensed: emitted * 20,
         })
+        activeWithdrawalContext = null
         return
       }
       emitted += 1
@@ -1836,6 +2101,7 @@ function startHopper(amount) {
         type: 'WITHDRAW_DISPENSE',
         dispensed: 20,
       })
+      void recordWithdrawalDispense(20)
       setTimeout(tick, 120)
     }
 
@@ -1898,6 +2164,7 @@ function handleWithdrawPulse() {
     type: 'WITHDRAW_DISPENSE',
     dispensed: 20,
   })
+  void recordWithdrawalDispense(20)
   if (hopperDispensed >= hopperTarget) {
     stopHopper()
   }
@@ -1925,6 +2192,7 @@ function stopHopper() {
     type: 'WITHDRAW_COMPLETE',
     dispensed: hopperDispensed,
   })
+  activeWithdrawalContext = null
 }
 
 // ============================
@@ -2282,6 +2550,25 @@ function logInputLinks(reason = 'snapshot') {
 
 logInputLinks('boot')
 
+function getInputLinkState() {
+  const casino = getJsIndexFromSymlink('/dev/input/casino')
+  const player1 = getJsIndexFromSymlink('/dev/input/player1')
+  const player2 = getJsIndexFromSymlink('/dev/input/player2')
+
+  return {
+    casino,
+    player1,
+    player2,
+    missing: {
+      casino: casino === null,
+      player1: player1 === null,
+      player2: player2 === null,
+    },
+    waiting: Array.from(waitingInputDevices.values()),
+    healthy: casino !== null && player1 !== null && player2 !== null,
+  }
+}
+
 function startEventDevice(path, label) {
   if (!IS_PI) {
     console.log(`[${label}] compat-mode skipping ${path}`)
@@ -2503,6 +2790,7 @@ function handleKey(source, index, value) {
         handleDepositPulse()
         break
       case 'HOPPER_COIN':
+        void recordHopperTopup(HOPPER_TOPUP_COIN_VALUE)
         dispatch({
           type: 'HOPPER_COIN',
           amount: HOPPER_TOPUP_COIN_VALUE,
@@ -2972,10 +3260,6 @@ async function shutdown() {
     clearRetroarchStopTimers()
     clearScheduledForceSwitchToUI()
 
-    if (serverInstance) {
-      await new Promise(resolve => serverInstance.close(resolve))
-    }
-
     if (sseClients.size > 0) {
       for (const client of [...sseClients]) {
         try {
@@ -2983,6 +3267,10 @@ async function shutdown() {
         } catch {}
         sseClients.delete(client)
       }
+    }
+
+    if (serverInstance) {
+      await new Promise(resolve => serverInstance.close(resolve))
     }
   } catch (err) {
     console.error('[SHUTDOWN ERROR]', err)
@@ -3251,6 +3539,98 @@ function getPackageKey() {
   return Buffer.from(keyHex, 'hex')
 }
 
+function getDevCasinoEntryEnvKey(gameId) {
+  return `ARCADE_DEV_CASINO_ENTRY_${String(gameId || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase()}`
+}
+
+function isAllowedCompatEntryUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''))
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false
+
+    const host = parsed.hostname.toLowerCase()
+    if (!['localhost', '127.0.0.1'].includes(host)) return false
+
+    const port = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80))
+    if ([3001, 5173, 5174].includes(port)) return false
+
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function probeCompatEntryUrl(entryUrl) {
+  try {
+    const { stdout } = await execFileAsync('curl', [
+      '-sS',
+      '-L',
+      '--max-time',
+      '2',
+      '--output',
+      '/dev/null',
+      '--write-out',
+      '%{http_code}',
+      entryUrl,
+    ])
+    const status = Number.parseInt(String(stdout || '').trim(), 10)
+    return Number.isFinite(status) && status >= 200 && status < 400
+  } catch {
+    return false
+  }
+}
+
+async function resolveCompatGamePackageEntry({ id, packageUrl }) {
+  if (IS_PI) return null
+
+  const gameId = String(id || '').trim().toLowerCase()
+  const candidates = []
+  const gameSpecificEnv = process.env[getDevCasinoEntryEnvKey(gameId)]
+  if (gameSpecificEnv) candidates.push(gameSpecificEnv)
+
+  if (gameId === 'ultraace' && process.env.ULTRAACE_DEV_URL) {
+    candidates.push(process.env.ULTRAACE_DEV_URL)
+  }
+
+  if (isAllowedCompatEntryUrl(packageUrl)) {
+    candidates.push(packageUrl)
+  }
+
+  if (gameId === 'ultraace') {
+    candidates.push(
+      'http://127.0.0.1:4173',
+      'http://localhost:4173',
+      'http://127.0.0.1:4174',
+      'http://localhost:4174',
+      'http://127.0.0.1:5175',
+      'http://localhost:5175',
+      'http://127.0.0.1:4175',
+      'http://localhost:4175',
+    )
+  }
+
+  const seen = new Set()
+  for (const candidate of candidates) {
+    const entry = String(candidate || '').trim()
+    if (!entry || seen.has(entry) || !isAllowedCompatEntryUrl(entry)) continue
+    seen.add(entry)
+    if (await probeCompatEntryUrl(entry)) {
+      return {
+        entry,
+        installed: false,
+        cached: false,
+        compatBypass: true,
+      }
+    }
+  }
+
+  return null
+}
+
 async function installEncryptedGamePackage({ id, packageUrl, version, force = false }) {
   const key = getPackageKey()
   if (!key) {
@@ -3448,26 +3828,40 @@ function purgeRuntimeGamePackages() {
 function getNetworkInfo() {
   const nets = os.networkInterfaces()
 
-  const pickIpv4 = name => {
+  const getExternalIpv4 = name => {
     const entries = nets[name] || []
-    const found = entries.find(e => e && e.family === 'IPv4' && !e.internal)
-    return found?.address || null
+    return entries.find(e => e && e.family === 'IPv4' && !e.internal) || null
   }
 
-  const pickActiveName = iface => {
-    try {
-      const name = os.networkInterfaces()[iface]?.find(e => e && e.family === 'IPv4' && !e.internal)
-      return name ? iface : null
-    } catch {
-      return null
+  if (!IS_PI) {
+    const entries = Object.entries(nets)
+      .map(([name, list]) => ({
+        name,
+        ipv4: (list || []).find(entry => entry && entry.family === 'IPv4' && !entry.internal) || null,
+      }))
+      .filter(entry => entry.ipv4)
+
+    const wifiEntry =
+      entries.find(entry => /^(wi-?fi|wlan|wl|airport|en0)$/i.test(entry.name)) || null
+    const ethernetEntry =
+      entries.find(entry => entry.name !== wifiEntry?.name && /^(eth|en|bridge|lan)/i.test(entry.name)) ||
+      null
+    const fallbackEntry = entries[0] || null
+
+    return {
+      ethernet: ethernetEntry?.ipv4?.address || (!wifiEntry ? fallbackEntry?.ipv4?.address || null : null),
+      wifi: wifiEntry?.ipv4?.address || null,
+      ethernet_name:
+        ethernetEntry?.name || (!wifiEntry ? fallbackEntry?.name || null : null),
+      wifi_name: wifiEntry?.name || null,
     }
   }
 
   return {
-    ethernet: pickIpv4('eth0'),
-    wifi: pickIpv4('wlan0'),
-    ethernet_name: pickActiveName('eth0'),
-    wifi_name: pickActiveName('wlan0'),
+    ethernet: getExternalIpv4('eth0')?.address || null,
+    wifi: getExternalIpv4('wlan0')?.address || null,
+    ethernet_name: getExternalIpv4('eth0') ? 'eth0' : null,
+    wifi_name: getExternalIpv4('wlan0') ? 'wlan0' : null,
   }
 }
 
@@ -3554,6 +3948,15 @@ function resolveRomPath(romValue) {
 }
 
 const server = http.createServer((req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204)
+    return res.end()
+  }
+
   if (req.method === 'OPTIONS' && req.url.startsWith('/game-package/')) {
     setJsonCors(res)
     res.writeHead(204)
@@ -3562,12 +3965,73 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && req.url === '/device-id') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ deviceId: DEVICE_ID }))
+    res.end(
+      JSON.stringify({
+        deviceId: DEVICE_ID,
+        isPi: IS_PI,
+        compatMode: !IS_PI,
+        devInputBypass: DEV_INPUT_BYPASS_ENABLED,
+        platform: process.platform,
+      }),
+    )
+    return
+  }
+  if (req.method === 'POST' && req.url === '/dev-input') {
+    if (!DEV_INPUT_BYPASS_ENABLED) {
+      return sendJson(res, 403, { success: false, error: 'DEV_INPUT_DISABLED' })
+    }
+
+    let body = ''
+    req.on('data', chunk => {
+      body += chunk
+    })
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}')
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          return sendJson(res, 400, { success: false, error: 'INVALID_PAYLOAD' })
+        }
+
+        broadcast(payload)
+        return sendJson(res, 200, { success: true, forwarded: true })
+      } catch (error) {
+        console.error('[DEV INPUT] invalid payload', error)
+        return sendJson(res, 400, { success: false, error: 'INVALID_JSON' })
+      }
+    })
     return
   }
   if (req.method === 'GET' && req.url === '/network-info') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(getNetworkInfo()))
+    return
+  }
+  if (req.method === 'GET' && req.url === '/withdraw-limits') {
+    ;(async () => {
+      try {
+        const state =
+          IS_PI && hasSupabaseRpcConfig() ? await fetchDeviceFinancialState(DEVICE_ID) : null
+        const balance = toMoney(state?.balance, 0)
+        const hopperBalance = toMoney(state?.hopperBalance, 0)
+        const configuredMax = state
+          ? getMaxWithdrawalAmountForHopperBalance(hopperBalance)
+          : null
+        const maxWithdrawalAmount =
+          configuredMax === null ? null : Math.max(0, Math.min(balance, hopperBalance, configuredMax))
+
+        return sendJson(res, 200, {
+          success: true,
+          balance,
+          hopperBalance,
+          maxWithdrawalAmount,
+          configuredMax,
+          enabled: Boolean(IS_PI && hasSupabaseRpcConfig()),
+        })
+      } catch (error) {
+        console.error('[WITHDRAW] limits fetch failed', error)
+        return sendJson(res, 500, { success: false, error: 'WITHDRAW_LIMITS_FAILED' })
+      }
+    })()
     return
   }
   if (req.method === 'GET' && req.url === '/events') {
@@ -3583,10 +4047,12 @@ const server = http.createServer((req, res) => {
 
     checkInternetOnce()
       .then(online => {
-        sendSse(res, { type: online ? 'INTERNET_OK' : 'INTERNET_LOST' })
+        const hasLink = hasLocalNetworkLink()
+        const effectiveOnline = getCompatOnlineState(online, hasLink)
+        sendSse(res, { type: effectiveOnline ? 'INTERNET_OK' : 'INTERNET_LOST' })
       })
       .catch(() => {
-        sendSse(res, { type: 'INTERNET_LOST' })
+        sendSse(res, { type: hasLocalNetworkLink() ? 'INTERNET_OK' : 'INTERNET_LOST' })
       })
 
     req.on('close', () => {
@@ -3597,6 +4063,9 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && req.url === '/arcade-shell-update/status') {
     return sendJson(res, 200, { success: true, ...getArcadeShellUpdateStatus() })
+  }
+  if (req.method === 'GET' && req.url === '/input-link-status') {
+    return sendJson(res, 200, { success: true, ...getInputLinkState() })
   }
   if (req.method === 'GET' && req.url === '/arcade-life/overlay-state') {
     return sendJson(res, 200, { success: true, ...getArcadeRetroOverlayState() })
@@ -4061,12 +4530,19 @@ const server = http.createServer((req, res) => {
           return res.end(JSON.stringify({ success: false, error: 'Missing id or packageUrl' }))
         }
 
-        const result = await installEncryptedGamePackage({
+        const compatResult = await resolveCompatGamePackageEntry({
           id,
           packageUrl,
-          version: version ?? 1,
-          force: Boolean(force),
         })
+
+        const result =
+          compatResult ||
+          (await installEncryptedGamePackage({
+            id,
+            packageUrl,
+            version: version ?? 1,
+            force: Boolean(force),
+          }))
 
         res.writeHead(200, { 'Content-Type': 'application/json' })
         return res.end(JSON.stringify({ success: true, ...result }))
@@ -4263,6 +4739,7 @@ const server = http.createServer((req, res) => {
           const previous = arcadeSession.lastKnownBalance
           const changed = previous !== nextBalance
           arcadeSession.lastKnownBalance = nextBalance
+          noteArcadeBalancePush(nextBalance)
 
           if (changed) {
             console.log('[ARCADE LIFE BALANCE] applied', {
@@ -4308,7 +4785,16 @@ const server = http.createServer((req, res) => {
           res.writeHead(409)
           return res.end('Withdraw blocked during RetroArch')
         }
-        startHopper(payload.amount)
+        const validation = await validateWithdrawRequest(payload.amount)
+        if (!validation.ok) {
+          console.warn('[HOPPER] withdraw rejected', validation)
+          res.writeHead(validation.status || 409)
+          return res.end(validation.error || 'Withdraw rejected')
+        }
+
+        startHopper(validation.amount)
+        res.writeHead(200)
+        return res.end('OK')
       }
 
       if (payload.type === 'LAUNCH_GAME') {
@@ -4594,6 +5080,11 @@ function hasLocalNetworkLink() {
   return Boolean(info?.ethernet || info?.wifi)
 }
 
+function getCompatOnlineState(online, hasLink) {
+  if (!IS_PI) return Boolean(online || hasLink)
+  return Boolean(online)
+}
+
 let checkingNetwork = false
 
 async function monitorInternet() {
@@ -4602,17 +5093,18 @@ async function monitorInternet() {
 
   const online = await checkInternetOnce()
   const hasLink = hasLocalNetworkLink()
+  const effectiveOnline = getCompatOnlineState(online, hasLink)
 
   checkingNetwork = false
 
   if (lastInternetState === null) {
-    lastInternetState = online || hasLink
-    internetOkStreak = online ? 1 : 0
-    internetFailStreak = online || hasLink ? 0 : 1
+    lastInternetState = effectiveOnline
+    internetOkStreak = effectiveOnline ? 1 : 0
+    internetFailStreak = effectiveOnline ? 0 : 1
     return
   }
 
-  if (online) {
+  if (effectiveOnline) {
     internetOkStreak += 1
     internetFailStreak = 0
   } else if (hasLink) {

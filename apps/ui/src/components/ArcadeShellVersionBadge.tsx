@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { API_BASE } from '../lib/runtime'
 
 type ArcadeShellBuildInfo = {
   version?: string
@@ -15,7 +16,7 @@ export function ArcadeShellVersionBadge({ deviceId }: Props) {
   useEffect(() => {
     let cancelled = false
 
-    fetch('/arcade-shell-build.json', { cache: 'no-store' })
+    fetch(`${API_BASE}/arcade-shell-build.json`, { cache: 'no-store' })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json() as Promise<ArcadeShellBuildInfo>

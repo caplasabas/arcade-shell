@@ -5,9 +5,22 @@ set -euo pipefail
 export HOME="${HOME:-/home/arcade1}"
 export USER="${USER:-arcade1}"
 export LOGNAME="${LOGNAME:-$USER}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
+if [[ ! -d "$RUNTIME_DIR" || ! -w "$RUNTIME_DIR" ]]; then
+  RUNTIME_DIR="/tmp/arcade-ui-runtime"
+fi
+install -d -m 0700 "$RUNTIME_DIR"
+install -d -m 0700 "$RUNTIME_DIR/dconf"
+
+export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR}/bus}"
-export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
+
+if [[ -S "/run/user/1000/pulse/native" ]]; then
+  export PULSE_SERVER="unix:/run/user/1000/pulse/native"
+else
+  unset PULSE_SERVER
+fi
 
 xsetroot -solid black
 xset s off
@@ -25,9 +38,11 @@ if [[ -z "$WINDOW_SIZE" ]]; then
   WINDOW_SIZE="1440x900"
 fi
 
-exec /usr/lib/chromium/chromium \
+CHROMIUM_CMD=(
+  /usr/lib/chromium/chromium
   --kiosk \
   http://localhost:5174 \
+  --autoplay-policy=no-user-gesture-required \
   --window-position=0,0 \
   --window-size="${WINDOW_SIZE/x/,}" \
   --start-fullscreen \
@@ -42,3 +57,10 @@ exec /usr/lib/chromium/chromium \
   --ozone-platform=x11 \
   --default-background-color=000000 \
   --user-data-dir="$KIOSK_PROFILE_DIR"
+)
+
+if command -v dbus-run-session >/dev/null 2>&1; then
+  exec dbus-run-session -- "${CHROMIUM_CMD[@]}"
+fi
+
+exec "${CHROMIUM_CMD[@]}"

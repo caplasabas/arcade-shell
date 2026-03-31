@@ -8,10 +8,10 @@ type Props = {
 }
 
 const SETTINGS_ROWS: Array<{ id: SettingsItem; label: string; hint: string }> = [
-  { id: 'volume', label: 'VOLUME', hint: 'LEFT / RIGHT TO ADJUST' },
-  { id: 'network', label: 'NETWORK', hint: 'OPEN WIFI SETUP' },
-  { id: 'reboot', label: 'REBOOT', hint: 'RESTART THE CABINET' },
-  { id: 'shutdown', label: 'SHUTDOWN', hint: 'POWER OFF SAFELY' },
+  { id: 'volume', label: 'Volume', hint: 'LEFT / RIGHT TO ADJUST' },
+  { id: 'network', label: 'Network', hint: 'OPEN WIFI SETUP' },
+  { id: 'reboot', label: 'Reboot', hint: 'RESTART THE CABINET' },
+  { id: 'shutdown', label: 'Shutdown', hint: 'POWER OFF SAFELY' },
 ]
 
 export function SettingsModal({ selected, volumeLabel, volumePercent, offline }: Props) {
@@ -27,7 +27,11 @@ export function SettingsModal({ selected, volumeLabel, volumePercent, offline }:
             {SETTINGS_ROWS.map(item => {
               const active = item.id === selected
               const value =
-                item.id === 'volume' ? volumeLabel : item.id === 'network' && offline ? 'OFFLINE' : ''
+                item.id === 'volume'
+                  ? volumeLabel
+                  : item.id === 'network' && offline
+                    ? 'OFFLINE'
+                    : ''
 
               return (
                 <div

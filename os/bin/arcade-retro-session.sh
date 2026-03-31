@@ -10,6 +10,8 @@ OVERLAY_BIN="${ARCADE_RETRO_OVERLAY_BIN:-/opt/arcade/bin/arcade-retro-overlay}"
 OVERLAY_HOST="${ARCADE_RETRO_OVERLAY_HOST:-127.0.0.1}"
 OVERLAY_PORT="${ARCADE_RETRO_OVERLAY_PORT:-5174}"
 OVERLAY_PATH="${ARCADE_RETRO_OVERLAY_PATH:-/arcade-life/overlay-state}"
+OVERLAY_READY_RETRIES="${ARCADE_RETRO_OVERLAY_READY_RETRIES:-40}"
+OVERLAY_READY_POLL_MS="${ARCADE_RETRO_OVERLAY_READY_POLL_MS:-250}"
 RETROARCH_BIN="${ARCADE_RETRO_BIN:-retroarch}"
 RETRO_RUN_USER="${ARCADE_RETRO_RUN_USER:-arcade1}"
 RETRO_RUN_HOME="${ARCADE_RETRO_RUN_HOME:-/home/${RETRO_RUN_USER}}"
@@ -231,6 +233,47 @@ print(f"{value / 1000:.3f}")
 PY
 }
 
+get_overlay_ready_poll_seconds() {
+  python3 - "$OVERLAY_READY_POLL_MS" <<'PY'
+import sys
+value = 250
+try:
+    value = max(50, int(float(sys.argv[1])))
+except Exception:
+    value = 250
+print(f"{value / 1000:.3f}")
+PY
+}
+
+wait_for_overlay_state() {
+  if ! command -v curl >/dev/null 2>&1; then
+    log "overlay readiness skipped: curl missing"
+    return 0
+  fi
+
+  local overlay_url="http://${OVERLAY_HOST}:${OVERLAY_PORT}${OVERLAY_PATH}"
+  local poll_seconds
+  local attempt
+  poll_seconds="$(get_overlay_ready_poll_seconds)"
+
+  for attempt in $(seq 1 "$OVERLAY_READY_RETRIES"); do
+    if curl -fsS --max-time 1 "$overlay_url" >/dev/null 2>&1; then
+      log "overlay endpoint ready attempt=$attempt url=$overlay_url"
+      return 0
+    fi
+
+    if [[ -n "$retroarch_pid" ]] && ! kill -0 "$retroarch_pid" >/dev/null 2>&1; then
+      log "overlay readiness aborted: RetroArch exited before endpoint became ready"
+      return 1
+    fi
+
+    sleep "$poll_seconds"
+  done
+
+  log "overlay endpoint did not become ready in time; launching overlay anyway"
+  return 0
+}
+
 launch_overlay_after_delay() {
   local delay_seconds
   delay_seconds="$(get_overlay_delay_seconds)"
@@ -238,6 +281,7 @@ launch_overlay_after_delay() {
   sleep "$delay_seconds"
 
   while [[ -n "$retroarch_pid" ]] && kill -0 "$retroarch_pid" >/dev/null 2>&1; do
+    wait_for_overlay_state || return 0
     launch_overlay
     return
   done

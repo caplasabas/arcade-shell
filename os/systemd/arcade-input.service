@@ -1,6 +1,8 @@
 [Unit]
 Description=Arcade Input Service
 After=network.target
+Wants=arcade-retro-x.service
+After=arcade-retro-x.service
 StartLimitBurst=5
 StartLimitIntervalSec=60
 
@@ -19,7 +21,7 @@ Environment=ARCADE_UI_DIST_DIR=/opt/arcade/ui/dist
 Environment=UINPUT_HELPER_PATH=/opt/arcade/bin/uinput-helper
 Environment=RETROARCH_TTY_MODE=1
 Environment=RETROARCH_TTY_X_SESSION=1
-Environment=RETROARCH_TTY_X_PREWARM=0
+Environment=RETROARCH_TTY_X_PREWARM=1
 Environment=ARCADE_UI_VT=2
 Environment=ARCADE_GAME_VT=1
 Environment=RETROARCH_PRIMARY_INPUT=P1
@@ -29,6 +31,7 @@ Environment=ARCADE_RETRO_OVERLAY_ENABLE=1
 Environment=CASINO_MENU_EXITS_RETROARCH=1
 ExecStartPre=/opt/arcade/os/bin/arcade-audio-init.sh
 ExecStart=/usr/bin/node /opt/arcade/service/input.bundle.cjs
+TimeoutStopSec=5
 Restart=always
 RestartSec=3
 StandardOutput=journal

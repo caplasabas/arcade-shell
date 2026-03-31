@@ -53,3 +53,5 @@ tmp/
 *.pem
 *.key
 id_rsa*
+
+/apps/ui/public/roms/

@@ -5,13 +5,14 @@ SCRIPT_NAME=$(basename "$0")
 LOG_DIR=${LOG_DIR:-/var/log/arcade-watchdog}
 LOG_FILE=${LOG_FILE:-$LOG_DIR/watchdog.log}
 CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+STARTUP_GRACE_SEC=${STARTUP_GRACE_SEC:-30}
 
-CHROMIUM_CMD=${CHROMIUM_CMD:-"/usr/bin/chromium --kiosk --disable-infobars http://localhost"}
-CHROMIUM_PATTERN=${CHROMIUM_PATTERN:-chromium}
+CHROMIUM_CMD=${CHROMIUM_CMD:-}
+CHROMIUM_PATTERN=${CHROMIUM_PATTERN:-}
 CHROMIUM_LOG=${CHROMIUM_LOG:-$LOG_DIR/chromium.log}
 
-RETROARCH_CMD=${RETROARCH_CMD:-"/usr/bin/retroarch"}
-RETROARCH_PATTERN=${RETROARCH_PATTERN:-retroarch}
+RETROARCH_CMD=${RETROARCH_CMD:-}
+RETROARCH_PATTERN=${RETROARCH_PATTERN:-}
 RETROARCH_LOG=${RETROARCH_LOG:-$LOG_DIR/retroarch.log}
 RETROARCH_STUCK_CPU_THRESHOLD=${RETROARCH_STUCK_CPU_THRESHOLD:-0.5}
 RETROARCH_STUCK_CYCLES=${RETROARCH_STUCK_CYCLES:-6}
@@ -20,6 +21,13 @@ INPUT_SERVICE_NAME=${INPUT_SERVICE_NAME:-arcade-input.service}
 INPUT_HEALTH_URL=${INPUT_HEALTH_URL:-http://127.0.0.1:5174/device-id}
 INPUT_HEALTH_TIMEOUT=${INPUT_HEALTH_TIMEOUT:-3}
 INPUT_FAILURE_RESTART_THRESHOLD=${INPUT_FAILURE_RESTART_THRESHOLD:-2}
+INPUT_LINK_STATUS_URL=${INPUT_LINK_STATUS_URL:-http://127.0.0.1:5174/input-link-status}
+INPUT_LINK_FAILURE_RESTART_THRESHOLD=${INPUT_LINK_FAILURE_RESTART_THRESHOLD:-3}
+
+UI_SERVICE_NAME=${UI_SERVICE_NAME:-arcade-ui.service}
+UI_HEALTH_URL=${UI_HEALTH_URL:-http://127.0.0.1:5174/}
+UI_HEALTH_TIMEOUT=${UI_HEALTH_TIMEOUT:-4}
+UI_FAILURE_RESTART_THRESHOLD=${UI_FAILURE_RESTART_THRESHOLD:-2}
 
 NETWORK_CHECK_HOST=${NETWORK_CHECK_HOST:-1.1.1.1}
 NETWORK_CHECK_TIMEOUT=${NETWORK_CHECK_TIMEOUT:-5}
@@ -41,11 +49,14 @@ trap 'log CRITICAL "triggered exit ($?)"' EXIT
 
 retroarch_stuck_counter=0
 input_failures=0
+input_link_failures=0
+ui_failures=0
 network_failures=0
 disk_failure_count=0
 smart_failure_count=0
 last_smart_check=0
 reboot_triggered=0
+started_at=$SECONDS
 
 log() {
   local level=$1
@@ -112,6 +123,9 @@ restart_managed_service() {
 }
 
 monitor_input_service() {
+  if ((SECONDS - started_at < STARTUP_GRACE_SEC)); then
+    return
+  fi
   local service_name=$INPUT_SERVICE_NAME
   local health_url=$INPUT_HEALTH_URL
   local timeout_seconds=$INPUT_HEALTH_TIMEOUT
@@ -147,7 +161,72 @@ monitor_input_service() {
   fi
 }
 
+monitor_input_links() {
+  if ((SECONDS - started_at < STARTUP_GRACE_SEC)); then
+    return
+  fi
+  local status_url=$INPUT_LINK_STATUS_URL
+  if [[ -z "$status_url" ]]; then
+    input_link_failures=0
+    return
+  fi
+
+  local payload
+  payload=$(curl -fsS --max-time "$INPUT_HEALTH_TIMEOUT" "$status_url" 2>/dev/null || true)
+  if [[ -z "$payload" ]]; then
+    ((input_link_failures++))
+    log WARN "InputLinks" "status probe failed ($input_link_failures/$INPUT_LINK_FAILURE_RESTART_THRESHOLD)"
+  elif grep -q '"healthy":[[:space:]]*true' <<<"$payload"; then
+    if ((input_link_failures > 0)); then
+      log INFO "InputLinks" "all links restored"
+    fi
+    input_link_failures=0
+    return
+  else
+    ((input_link_failures++))
+    log WARN "InputLinks" "encoder link missing ($input_link_failures/$INPUT_LINK_FAILURE_RESTART_THRESHOLD)"
+  fi
+
+  if ((input_link_failures >= INPUT_LINK_FAILURE_RESTART_THRESHOLD)); then
+    restart_managed_service "$INPUT_SERVICE_NAME"
+    restart_managed_service "$UI_SERVICE_NAME"
+    input_link_failures=0
+  fi
+}
+
+monitor_ui_service() {
+  if ((SECONDS - started_at < STARTUP_GRACE_SEC)); then
+    return
+  fi
+  local service_name=$UI_SERVICE_NAME
+  if [[ -n "$service_name" ]] && command -v systemctl >/dev/null 2>&1; then
+    if ! systemctl is-active --quiet "$service_name"; then
+      ((ui_failures++))
+      log WARN "UI" "$service_name inactive ($ui_failures/$UI_FAILURE_RESTART_THRESHOLD)"
+    else
+      if [[ -n "$UI_HEALTH_URL" ]] && ! curl -fsS --max-time "$UI_HEALTH_TIMEOUT" "$UI_HEALTH_URL" >/dev/null 2>&1; then
+        ((ui_failures++))
+        log WARN "UI" "health probe failed ($ui_failures/$UI_FAILURE_RESTART_THRESHOLD): $UI_HEALTH_URL"
+      else
+        if ((ui_failures > 0)); then
+          log INFO "UI" "health restored"
+        fi
+        ui_failures=0
+        return
+      fi
+    fi
+  fi
+
+  if ((ui_failures >= UI_FAILURE_RESTART_THRESHOLD)); then
+    restart_managed_service "$service_name"
+    ui_failures=0
+  fi
+}
+
 monitor_chromium() {
+  if [[ -z "$CHROMIUM_PATTERN" || -z "$CHROMIUM_CMD" ]]; then
+    return
+  fi
   local pid
   pid=$(process_pid "$CHROMIUM_PATTERN")
   if [[ -z "$pid" ]]; then
@@ -157,6 +236,9 @@ monitor_chromium() {
 }
 
 monitor_retroarch() {
+  if [[ -z "$RETROARCH_PATTERN" || -z "$RETROARCH_CMD" ]]; then
+    return
+  fi
   local pid cpu
   pid=$(process_pid "$RETROARCH_PATTERN")
 
@@ -290,6 +372,8 @@ main_loop() {
   notify_systemd_ready
   while true; do
     monitor_input_service
+    monitor_input_links
+    monitor_ui_service
     monitor_chromium
     monitor_retroarch
     check_network

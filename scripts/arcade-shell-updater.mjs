@@ -14,6 +14,10 @@ function fail(message) {
   throw new Error(message)
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 function normalizeUrl(base) {
   return String(base || '')
     .trim()
@@ -106,7 +110,6 @@ function isUnmanagedLocalBuild(version) {
     .trim()
     .toLowerCase()
   if (!value) return false
-  if (value.includes('dirty')) return true
   return /^[0-9a-f]{7,}$/.test(value)
 }
 
@@ -800,6 +803,70 @@ async function maybeRepairNativeHelpers(installDir) {
   return true
 }
 
+async function waitForCabinetIdle() {
+  const startDelayMs = Math.max(
+    0,
+    Number.parseInt(process.env.ARCADE_SHELL_START_DELAY_MS || '45000', 10) || 45000,
+  )
+  const idleWaitMs = Math.max(
+    0,
+    Number.parseInt(process.env.ARCADE_SHELL_IDLE_WAIT_MS || '180000', 10) || 180000,
+  )
+  const pollMs = Math.max(
+    1000,
+    Number.parseInt(process.env.ARCADE_SHELL_IDLE_POLL_MS || '5000', 10) || 5000,
+  )
+  const idleCheckUrl =
+    process.env.ARCADE_SHELL_IDLE_CHECK_URL || 'http://127.0.0.1:5174/arcade-life/overlay-state'
+
+  if (startDelayMs > 0) {
+    emitStatus({
+      phase: 'startup-delay',
+      label: 'Waiting before update check',
+      detail: `${Math.round(startDelayMs / 1000)}s boot settle`,
+    })
+    await sleep(startDelayMs)
+  }
+
+  if (idleWaitMs <= 0) return
+
+  const deadline = Date.now() + idleWaitMs
+
+  while (Date.now() < deadline) {
+    try {
+      const response = requestJsonWithCurl(idleCheckUrl, { timeoutMs: 1500 })
+      if (response.ok) {
+        const payload = response.json() || {}
+        if (payload.retroarchActive !== true && payload.active !== true) {
+          return
+        }
+
+        emitStatus({
+          phase: 'idle-wait',
+          label: 'Waiting for cabinet idle',
+          detail: payload.gameName || payload.gameId || 'RetroArch active',
+        })
+      } else {
+        emitStatus({
+          phase: 'idle-wait',
+          label: 'Waiting for cabinet idle',
+          detail: `overlay-state ${response.status}`,
+        })
+      }
+    } catch (error) {
+      emitStatus({
+        phase: 'idle-wait',
+        label: 'Waiting for cabinet idle',
+        detail: isNetworkError(error) ? 'input service not ready' : 'retrying idle probe',
+      })
+    }
+
+    await sleep(pollMs)
+  }
+
+  console.log('[arcade-shell-updater] idle wait expired; continuing with update check')
+}
+
 async function main() {
   const autoUpdateEnabled = String(process.env.ARCADE_SHELL_AUTO_UPDATE || '0') === '1'
   if (!autoUpdateEnabled && !forceUpdate && !manualCheck) {
@@ -836,6 +903,11 @@ async function main() {
     .split(',')
     .map(value => value.trim())
     .filter(Boolean)
+
+  if (!manualCheck && !forceUpdate) {
+    await waitForCabinetIdle()
+  }
+
   const shellUpdated = await maybeInstallShellUpdate({
     supabaseUrl,
     installDir,

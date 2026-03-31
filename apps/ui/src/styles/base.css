@@ -141,9 +141,9 @@ button:focus-visible {
     background-position: center;
     background-repeat: no-repeat;
 
-    filter: brightness(0.35);
-    transform: scale(1.08);
-    opacity: 0.95;
+    filter: blur(18px) brightness(0.34);
+    transform: scale(1.12);
+    opacity: 0.72;
 
     transition: background-image 280ms ease,
     opacity 280ms ease;
@@ -311,6 +311,12 @@ button:focus-visible {
     min-height: auto;
 }
 
+.modal-card-withdraw {
+    position: relative;
+    width: min(640px, 82vw);
+    min-height: 0;
+}
+
 .modal-header {
     background: #171614;
     padding: 4px 0;
@@ -332,11 +338,24 @@ button:focus-visible {
     /*justify-content: center;*/
 }
 
+.no-internet-body {
+    justify-content: center;
+    align-items: center;
+}
+
 
 .modal-row {
     margin: 16px 0;
     display: flex;
     justify-content: space-between;
+}
+
+.modal-row-withdraw {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    margin: 24px 0 18px;
 }
 
 .modal-card span {
@@ -384,7 +403,7 @@ button:focus-visible {
     color: #f7e8b5;
     font-size: 24px;
     letter-spacing: 0.02em;
-    text-transform: uppercase;
+    text-transform: capitalize;
 }
 
 .modal-exit-hint {
@@ -400,6 +419,73 @@ button:focus-visible {
     flex-direction: row;
     gap: 10px;
     align-items: center;
+}
+
+.withdraw-label {
+    color: #f0d9a7;
+    font-size: 24px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.withdraw-amount-value {
+    min-width: 210px;
+    color: #fff3c6 !important;
+    font-size: 58px;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-shadow: 0 0 24px rgba(255, 204, 107, 0.28);
+}
+
+.modal-warning-withdraw {
+    margin-top: 2px;
+    font-size: 14px;
+    opacity: 0.75;
+}
+
+.withdraw-progress-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(8, 8, 8, 0.78);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2;
+}
+
+.withdraw-progress-card {
+    min-width: min(420px, 78%);
+    padding: 26px 30px;
+    border: 1px solid rgba(255, 214, 120, 0.55);
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(38, 27, 10, 0.98), rgba(14, 10, 5, 0.96));
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.38);
+}
+
+.withdraw-progress-title {
+    color: #ffd98a;
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.withdraw-progress-amount {
+    margin-top: 10px;
+    color: #fff7da;
+    font-size: 72px;
+    line-height: 1;
+    font-weight: 900;
+    text-shadow: 0 0 26px rgba(255, 206, 115, 0.32);
+}
+
+.withdraw-progress-detail {
+    margin-top: 12px;
+    color: #e6c98d;
+    font-size: 20px;
+    font-weight: 600;
 }
 
 .boot-loading {

@@ -17,7 +17,7 @@ import { fetchCabinetGames, subscribeToCabinetGames, subscribeToGames } from './
 import { WithdrawModal } from './components/WithdrawModal'
 import { type ExitConfirmContext, ExitConfirmModal } from './components/ExitConfirmModal'
 
-import { ensureDeviceRegistered } from './lib/device'
+import { clearDeviceRuntimeState, ensureDeviceRegistered } from './lib/device'
 import { flushMetricEvents, queueMetricEvent } from './lib/metrics'
 import { API_BASE } from './lib/runtime'
 
@@ -47,6 +47,7 @@ const GRID_ROWS = 3
 const GRID_VISIBLE_COLS = 4
 const EXIT_CONFIRM_WINDOW_MS = 2800
 const BOOT_UPDATER_NETWORK_GRACE_MS = 4500
+const AUTO_BOOT_UPDATE_CHECK = false
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 
@@ -87,6 +88,24 @@ type TransitionOverlayState = {
   detail?: string | null
 }
 
+type CasinoWithdrawState = {
+  canOpen: boolean
+  balance: number
+  isWithdrawing: boolean
+  min: number
+  step: number
+}
+
+type CasinoMenuExitState = {
+  canExit: boolean
+}
+
+type WithdrawLimitsState = {
+  hopperBalance: number | null
+  maxWithdrawalAmount: number | null
+  enabled: boolean
+}
+
 function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
   const id = Number(raw?.id ?? 0)
   const device_id = String(raw?.device_id ?? '').trim()
@@ -111,6 +130,7 @@ function normalizeDeviceAdminCommand(raw: any): DeviceAdminCommandRow | null {
 
 export default function App() {
   const [focus, setFocus] = useState(0)
+  const [isPiCabinet, setIsPiCabinet] = useState(false)
   const [runningCasino, setRunningCasino] = useState(false)
   const [runningCasinoSrc, setRunningCasinoSrc] = useState<string | null>(null)
   const casinoFrameRef = useRef<HTMLIFrameElement | null>(null)
@@ -147,6 +167,17 @@ export default function App() {
   const [uiNotice, setUiNotice] = useState<string | null>(null)
 
   const [initialized, setInitialized] = useState(false)
+
+  const isOfflineModalConfirmInput = (payload: any) => {
+    if (!payload || typeof payload !== 'object') return false
+
+    if (payload.type === 'PLAYER') {
+      const button = payload.button
+      return button === 0 || button === '0' || button === 'A'
+    }
+
+    return false
+  }
   const [balance, setBalance] = useState(0)
   const lastAuthoritativeUpdatedAtRef = useRef(0)
   const lastAuthoritativeRevisionRef = useRef(0)
@@ -155,6 +186,14 @@ export default function App() {
   const pendingMetricQueueRef = useRef<Array<{ revisionDelta: number; balanceDelta: number }>>([])
 
   const [games, setGames] = useState<Game[]>([])
+  const devInputBypassEnabled =
+    import.meta.env.DEV &&
+    deviceId?.startsWith('dev-') &&
+    /mac/i.test(
+      typeof navigator !== 'undefined'
+        ? [navigator.platform, navigator.userAgent].filter(Boolean).join(' ')
+        : '',
+    )
 
   const isSelectableGame = useCallback((game: Game | null | undefined) => {
     if (!game) return false
@@ -189,8 +228,61 @@ export default function App() {
   )
 
   const selectedGame = games[focus] ?? null
-  const hasLocalLink = wifiConnected || Boolean(ethernetIp)
+  const selectedGameArt = selectedGame?.art?.trim() || bootImage
+  const hasLocalLink = wifiConnected || Boolean(ethernetIp) || Boolean(wifiIp)
   const currentIp = ethernetIp?.trim() || wifiIp?.trim() || null
+  const piOfflineLockActive = isPiCabinet && networkStage === 'no-internet'
+
+  useEffect(() => {
+    let cancelled = false
+
+    fetch(`${API_BASE}/device-id`, { cache: 'no-store' })
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (cancelled || !data || typeof data !== 'object') return
+        setIsPiCabinet(Boolean((data as { isPi?: boolean }).isPi))
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let stopped = false
+
+    const fetchWithdrawLimits = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/withdraw-limits`, { cache: 'no-store' })
+        if (!response.ok) return
+        const data = (await response.json().catch(() => null)) as {
+          hopperBalance?: number | null
+          maxWithdrawalAmount?: number | null
+          enabled?: boolean
+        } | null
+        if (stopped || !data) return
+
+        setWithdrawLimits({
+          hopperBalance:
+            typeof data.hopperBalance === 'number' ? Number(data.hopperBalance) : null,
+          maxWithdrawalAmount:
+            typeof data.maxWithdrawalAmount === 'number' ? Number(data.maxWithdrawalAmount) : null,
+          enabled: Boolean(data.enabled),
+        })
+      } catch {
+        // ignore transient withdraw-limit failures
+      }
+    }
+
+    void fetchWithdrawLimits()
+    const interval = window.setInterval(fetchWithdrawLimits, 5000)
+
+    return () => {
+      stopped = true
+      window.clearInterval(interval)
+    }
+  }, [])
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -247,7 +339,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false
 
-    fetch('/arcade-shell-build.json', { cache: 'no-store' })
+    fetch(`${API_BASE}/arcade-shell-build.json`, { cache: 'no-store' })
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.json() as Promise<{ version?: string }>
@@ -375,6 +467,11 @@ export default function App() {
     ethernetIpRef.current = ethernetIp
   }, [ethernetIp])
 
+  const wifiIpRef = useRef(wifiIp)
+  useEffect(() => {
+    wifiIpRef.current = wifiIp
+  }, [wifiIp])
+
   const networkStageRef = useRef(networkStage)
 
   useEffect(() => {
@@ -383,8 +480,8 @@ export default function App() {
 
   const hasLocalLinkRef = useRef(false)
   useEffect(() => {
-    hasLocalLinkRef.current = Boolean(wifiConnected || ethernetIp)
-  }, [wifiConnected, ethernetIp])
+    hasLocalLinkRef.current = Boolean(wifiConnected || ethernetIp || wifiIp)
+  }, [wifiConnected, ethernetIp, wifiIp])
 
   const [, setLoading] = useState(false)
   const [transitionOverlay, setTransitionOverlay] = useState<TransitionOverlayState>({
@@ -431,9 +528,40 @@ export default function App() {
     runningGameRef.current = runningGame
   }, [runningGame])
 
+  const runningCasinoRef = useRef(runningCasino)
+  useEffect(() => {
+    runningCasinoRef.current = runningCasino
+  }, [runningCasino])
+
   const [withdrawAmount, setWithdrawAmount] = useState(20)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [isWithdrawing, setIsWithdrawing] = useState(false)
+  const [withdrawRequestedAmount, setWithdrawRequestedAmount] = useState(0)
+  const [withdrawRemainingAmount, setWithdrawRemainingAmount] = useState(0)
+  const withdrawRequestedAmountRef = useRef(0)
+  const [casinoWithdrawState, setCasinoWithdrawState] = useState<CasinoWithdrawState>({
+    canOpen: false,
+    balance: 0,
+    isWithdrawing: false,
+    min: 20,
+    step: 20,
+  })
+  const casinoWithdrawStateRef = useRef(casinoWithdrawState)
+  useEffect(() => {
+    casinoWithdrawStateRef.current = casinoWithdrawState
+  }, [casinoWithdrawState])
+  const [casinoMenuExitState, setCasinoMenuExitState] = useState<CasinoMenuExitState>({
+    canExit: false,
+  })
+  const casinoMenuExitStateRef = useRef(casinoMenuExitState)
+  useEffect(() => {
+    casinoMenuExitStateRef.current = casinoMenuExitState
+  }, [casinoMenuExitState])
+  const [withdrawLimits, setWithdrawLimits] = useState<WithdrawLimitsState>({
+    hopperBalance: null,
+    maxWithdrawalAmount: null,
+    enabled: false,
+  })
   const [showExitConfirmModal, setShowExitConfirmModal] = useState(false)
   const [exitConfirmContext, setExitConfirmContext] = useState<ExitConfirmContext | null>(null)
   const volumeAdjustRef = useRef<{ direction: 'up' | 'down' | null; at: number; streak: number }>({
@@ -464,7 +592,7 @@ export default function App() {
       setLoading(true)
       try {
         console.log(`[RECOVERY] Auto re-init start (${reason})`)
-        const id = await ensureDeviceRegistered('Arcade Cabinet')
+        const id = await ensureDeviceRegistered()
         deviceIdRef.current = id
         setDeviceId(current => (current === id ? current : id))
 
@@ -554,7 +682,7 @@ export default function App() {
       setVolumePercent(nextPercent)
     } catch (error) {
       console.error('[SETTINGS] volume refresh failed', error)
-      setVolumeLabel('VOLUME ERROR')
+      setVolumeLabel('Audio Error')
       setVolumePercent(null)
     }
   }, [])
@@ -605,7 +733,7 @@ export default function App() {
         flashUiNotice(direction === 'up' ? 'VOLUME UP' : 'VOLUME DOWN')
       } catch (error) {
         console.error('[SETTINGS] volume adjust failed', error)
-        flashUiNotice('VOLUME ERROR')
+        flashUiNotice('Audio Error')
       }
     },
     [flashUiNotice],
@@ -625,6 +753,18 @@ export default function App() {
     setSelectedSettingsItem('volume')
     setShowSettingsModal(true)
   }, [])
+
+  const openOfflineNetworkFlow = useCallback(() => {
+    setSelectedSettingsItem('network')
+    setShowWifiModal(false)
+    setShowSettingsModal(true)
+  }, [])
+
+  const isNoInternetModalActive =
+    piOfflineLockActive &&
+    !showWifiModal &&
+    !showSettingsModal &&
+    runningGame?.type !== 'arcade'
 
   const openNetworkSettings = useCallback(() => {
     setShowSettingsModal(false)
@@ -700,7 +840,7 @@ export default function App() {
     async function init() {
       setLoading(true)
       try {
-        const id = await ensureDeviceRegistered('Arcade Cabinet')
+        const id = await ensureDeviceRegistered()
         if (cancelled) return
 
         setDeviceId(id)
@@ -711,7 +851,7 @@ export default function App() {
         } catch (err) {
           if (!isMissingDeviceRowError(err)) throw err
           // RESET may have removed the row while app stayed mounted; recreate and retry.
-          await ensureDeviceRegistered('Arcade Cabinet')
+          await ensureDeviceRegistered()
           initialBalance = await fetchDeviceBalance(id)
         }
         if (cancelled) return
@@ -730,7 +870,9 @@ export default function App() {
         // Keep the shell usable when the Pi still has a local network link but
         // remote services are slow or temporarily unreachable.
         setNetworkStage(
-          wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet',
+          wifiConnectedRef.current || Boolean(ethernetIpRef.current) || Boolean(wifiIpRef.current)
+            ? 'ok'
+            : 'no-internet',
         )
       } finally {
         if (!cancelled) {
@@ -748,6 +890,15 @@ export default function App() {
   }, [applyAuthoritativeBalance, networkStage, resetPendingBalance])
 
   useEffect(() => {
+    if (!AUTO_BOOT_UPDATE_CHECK) {
+      if (networkStage === 'ok' && initialized && !bootFlowComplete) {
+        setShellUpdateOverlayVisible(false)
+        setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
+        setBootFlowComplete(true)
+      }
+      return
+    }
+
     if (networkStage !== 'ok' || !initialized) {
       if (shellUpdateStableTimerRef.current !== null) {
         window.clearTimeout(shellUpdateStableTimerRef.current)
@@ -834,7 +985,9 @@ export default function App() {
 
       if (networkStageRef.current === 'boot') {
         setNetworkStage(
-          wifiConnectedRef.current || Boolean(ethernetIpRef.current) ? 'ok' : 'no-internet',
+          wifiConnectedRef.current || Boolean(ethernetIpRef.current) || Boolean(wifiIpRef.current)
+            ? 'ok'
+            : 'no-internet',
         )
       }
     }, BOOT_UPDATER_NETWORK_GRACE_MS)
@@ -1094,15 +1247,11 @@ export default function App() {
 
     if (source === 'hopper') {
       queuePendingBalanceDelta(amount, -amount)
-      queueMetricEvent(id, 'withdrawal', amount)
     }
   }
 
   const addHopperBalance = (amount = 20) => {
-    const id = deviceIdRef.current
-    if (!id) return
-    queuePendingBalanceDelta(amount, 0)
-    queueMetricEvent(id, 'hopper_in', amount)
+    void amount
   }
 
   const recordBet = (amount = 0) => {
@@ -1121,21 +1270,26 @@ export default function App() {
 
   const STEP = 20
   const MIN = 20
+  const activeWithdrawBalance = runningCasino ? casinoWithdrawState.balance : balance
   const getMaxSelectable = (balance: number) => {
-    return Math.floor(balance / STEP) * STEP
+    const cappedBalance =
+      typeof withdrawLimits.maxWithdrawalAmount === 'number'
+        ? Math.min(balance, withdrawLimits.maxWithdrawalAmount)
+        : balance
+    return Math.floor(Math.max(0, cappedBalance) / STEP) * STEP
   }
   const isValidWithdrawAmount = (amount: number, balanceValue: number) => {
     if (!Number.isFinite(amount)) return false
     const max = getMaxSelectable(balanceValue)
     return amount >= MIN && amount <= max && amount % STEP === 0
   }
-  const maxSelectable = getMaxSelectable(balance)
+  const maxSelectable = getMaxSelectable(activeWithdrawBalance)
   const isWithdrawDisabled = maxSelectable < MIN
 
   const addWithdrawAmount = () => {
     if (isWithdrawDisabled) return
     setWithdrawAmount(prev => {
-      const max = getMaxSelectable(balance)
+      const max = getMaxSelectable(activeWithdrawBalance)
       return Math.min(prev + STEP, max)
     })
   }
@@ -1150,30 +1304,72 @@ export default function App() {
   useEffect(() => {
     if (!showWithdrawModal) return
     if (isWithdrawDisabled) return
-    const max = getMaxSelectable(balance)
+    const max = getMaxSelectable(activeWithdrawBalance)
     setWithdrawAmount(prev => {
       const normalized = Math.floor(prev / STEP) * STEP
       const withMin = Math.max(MIN, normalized)
       return Math.min(withMin, max)
     })
-  }, [showWithdrawModal, isWithdrawDisabled, balance])
+  }, [showWithdrawModal, isWithdrawDisabled, activeWithdrawBalance, withdrawLimits.maxWithdrawalAmount])
 
-  const submitWithdraw = useCallback(() => {
+  const submitWithdraw = useCallback(async () => {
     if (!hasLocalLinkRef.current) {
       flashUiNotice('OFFLINE')
       return
     }
-    if (isWithdrawing || !isValidWithdrawAmount(withdrawAmount, balance)) return
-    fetch(API_BASE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        type: 'WITHDRAW',
-        amount: withdrawAmount,
-      }),
+    if (isWithdrawing || !isValidWithdrawAmount(withdrawAmount, activeWithdrawBalance)) return
+    try {
+      const response = await fetch(API_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'WITHDRAW',
+          amount: withdrawAmount,
+        }),
+      })
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '')
+        throw new Error(`withdraw failed (${response.status}): ${errorText}`)
+      }
+      withdrawRequestedAmountRef.current = withdrawAmount
+      setWithdrawRequestedAmount(withdrawAmount)
+      setWithdrawRemainingAmount(withdrawAmount)
+      setIsWithdrawing(true)
+    } catch (error) {
+      console.error('[WITHDRAW] submit failed', error)
+      const message = String((error as Error)?.message || error || '')
+      if (message.toLowerCase().includes('max withdrawal amount is')) {
+        const match = message.match(/max withdrawal amount is ([0-9.,]+)/i)
+        flashUiNotice(match ? `MAX ${match[1]}` : 'MAX WITHDRAW REACHED')
+        return
+      }
+      if (message.toLowerCase().includes('insufficient hopper balance')) {
+        flashUiNotice('INSUFFICIENT HOPPER')
+        return
+      }
+      flashUiNotice('WITHDRAW FAILED')
+    }
+  }, [activeWithdrawBalance, flashUiNotice, isWithdrawing, withdrawAmount])
+
+  const openCasinoWithdrawModal = useCallback(() => {
+    if (!hasLocalLinkRef.current) {
+      flashUiNotice('OFFLINE')
+      return
+    }
+
+    const next = casinoWithdrawStateRef.current
+    if (!runningCasinoRef.current || !next.canOpen || next.isWithdrawing) return
+
+    const max = getMaxSelectable(next.balance)
+    if (max < MIN) return
+
+    setWithdrawAmount(prev => {
+      const normalized = Math.floor(prev / STEP) * STEP
+      const withMin = Math.max(MIN, normalized)
+      return Math.min(withMin, max)
     })
-    setIsWithdrawing(true)
-  }, [balance, flashUiNotice, isWithdrawing, withdrawAmount])
+    setShowWithdrawModal(true)
+  }, [flashUiNotice])
 
   const clearExitConfirmTimer = useCallback(() => {
     if (exitConfirmTimerRef.current !== null) {
@@ -1212,6 +1408,16 @@ export default function App() {
       )
     }
 
+    if (deviceIdRef.current) {
+      await clearDeviceRuntimeState(deviceIdRef.current)
+      resetPendingBalance()
+      applyAuthoritativeBalance({
+        balance: 0,
+        updatedAt: new Date().toISOString(),
+        revision: 0,
+      })
+    }
+
     preparedCasinoVersionRef.current = {}
     await recoverDeviceState('device-admin-reset')
     setTransitionOverlay({
@@ -1219,7 +1425,13 @@ export default function App() {
       label: 'Loading Game...',
       detail: null,
     })
-  }, [closeExitConfirm, closeSettingsModal, recoverDeviceState])
+  }, [
+    applyAuthoritativeBalance,
+    closeExitConfirm,
+    closeSettingsModal,
+    recoverDeviceState,
+    resetPendingBalance,
+  ])
 
   const processAdminCommand = useCallback(
     async (command: DeviceAdminCommandRow) => {
@@ -1392,6 +1604,54 @@ export default function App() {
     }
   }, [clearExitConfirmTimer])
 
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const frameWindow = casinoFrameRef.current?.contentWindow
+      if (!frameWindow || event.source !== frameWindow) return
+
+      const data = event.data
+      if (!data || typeof data !== 'object') return
+
+      if (data.type === 'ULTRAACE_WITHDRAW_STATE') {
+        const nextState: CasinoWithdrawState = {
+          canOpen: Boolean(data.canOpen),
+          balance: Number(data.balance ?? 0),
+          isWithdrawing: Boolean(data.isWithdrawing),
+          min: Number(data.min ?? 20),
+          step: Number(data.step ?? 20),
+        }
+
+        setCasinoWithdrawState(nextState)
+
+        if (showWithdrawModal && !isWithdrawing && !nextState.canOpen) {
+          setShowWithdrawModal(false)
+        }
+        return
+      }
+
+      if (data.type === 'ULTRAACE_WITHDRAW_REQUEST') {
+        openCasinoWithdrawModal()
+        return
+      }
+
+      if (data.type === 'ULTRAACE_MENU_EXIT_STATE') {
+        setCasinoMenuExitState({
+          canExit: Boolean(data.canExit),
+        })
+        return
+      }
+
+      if (data.type === 'ULTRAACE_REQUEST_EXIT_CONFIRM') {
+        requestExitConfirm('casino')
+      }
+    }
+
+    window.addEventListener('message', onMessage)
+    return () => {
+      window.removeEventListener('message', onMessage)
+    }
+  }, [isWithdrawing, openCasinoWithdrawModal, showWithdrawModal])
+
   const shellStateRef = useRef({
     initialized: false,
     balance: 0,
@@ -1402,6 +1662,8 @@ export default function App() {
     runningCasino: false,
     showSettingsModal: false,
     showWifiModal: false,
+    noInternetModalActive: false,
+    piOfflineLockActive: false,
   })
 
   useEffect(() => {
@@ -1415,6 +1677,8 @@ export default function App() {
       runningCasino,
       showSettingsModal,
       showWifiModal,
+      noInternetModalActive: isNoInternetModalActive,
+      piOfflineLockActive,
     }
   }, [
     initialized,
@@ -1426,6 +1690,8 @@ export default function App() {
     runningCasino,
     showSettingsModal,
     showWifiModal,
+    isNoInternetModalActive,
+    piOfflineLockActive,
   ])
 
   const addWithdrawAmountRef = useRef(addWithdrawAmount)
@@ -1440,6 +1706,7 @@ export default function App() {
   const handleSettingsActionRef = useRef(handleSettingsAction)
   const closeSettingsModalRef = useRef(closeSettingsModal)
   const openSettingsModalRef = useRef(openSettingsModal)
+  const openOfflineNetworkFlowRef = useRef(openOfflineNetworkFlow)
   const settingsFocusedRef = useRef(settingsFocused)
   const selectedSettingsItemRef = useRef(selectedSettingsItem)
 
@@ -1456,6 +1723,7 @@ export default function App() {
     handleSettingsActionRef.current = handleSettingsAction
     closeSettingsModalRef.current = closeSettingsModal
     openSettingsModalRef.current = openSettingsModal
+    openOfflineNetworkFlowRef.current = openOfflineNetworkFlow
   })
 
   useEffect(() => {
@@ -1564,7 +1832,20 @@ export default function App() {
         return
       }
 
+      if (s.noInternetModalActive && isOfflineModalConfirmInput(payload)) {
+        openOfflineNetworkFlowRef.current()
+        return
+      }
+
+      if (s.noInternetModalActive) {
+        return
+      }
+
       if (!payload || !s.initialized) return
+
+      if (s.piOfflineLockActive && payload.type === 'COIN') {
+        return
+      }
 
       if (payload.type === 'ARCADE_LIFE_STATE') {
         setArcadeLifeOverlay({
@@ -1596,7 +1877,7 @@ export default function App() {
         setTransitionOverlay({
           visible: true,
           label: 'Returning to Menu...',
-          detail: 'RESTORING ARCADE SHELL',
+          detail: 'LEAVING GAME SESSION',
         })
         return
       }
@@ -1660,12 +1941,27 @@ export default function App() {
       }
 
       if (s.runningCasino) {
-        if (
-          payload.type === 'COIN' ||
-          payload.type === 'WITHDRAW_DISPENSE' ||
-          payload.type === 'WITHDRAW_COMPLETE'
-        ) {
+        if (payload.type === 'COIN') {
           forwardToCasino()
+          return
+        }
+
+        if (payload.type === 'WITHDRAW_DISPENSE') {
+          forwardToCasino()
+          minusBalance('hopper', payload.dispensed)
+          setWithdrawRemainingAmount(prev => Math.max(0, prev - Number(payload.dispensed ?? 0)))
+          return
+        }
+
+        if (payload.type === 'WITHDRAW_COMPLETE') {
+          forwardToCasino()
+          setIsWithdrawingRef.current(false)
+          setShowWithdrawModalRef.current(false)
+          flashUiNotice(`SUCCESSFULLY WITHDRAWN ${formatPeso(withdrawRequestedAmountRef.current)}`)
+          setWithdrawAmount(withdrawRequestedAmountRef.current || MIN)
+          withdrawRequestedAmountRef.current = 0
+          setWithdrawRequestedAmount(0)
+          setWithdrawRemainingAmount(0)
           return
         }
       }
@@ -1675,6 +1971,29 @@ export default function App() {
       // ----------------------------------
       if (payload.type === 'PLAYER' && (payload.player === 'P1' || payload.player === 'CASINO')) {
         const button = payload.button
+
+        if (s.showWithdrawModal || s.isWithdrawing) {
+          if (button === 6 && s.showWithdrawModal && !s.isWithdrawing) {
+            setShowWithdrawModalRef.current(false)
+            return
+          }
+
+          if (s.showWithdrawModal && !s.isWithdrawing) {
+            if (button === 'LEFT' || button === 'DOWN') {
+              minusWithdrawAmountRef.current()
+              return
+            }
+            if (button === 'RIGHT' || button === 'UP') {
+              addWithdrawAmountRef.current()
+              return
+            }
+            if (button === 7 || button === 0 || button === 1) {
+              submitWithdrawRef.current()
+              return
+            }
+          }
+          return
+        }
 
         if (s.runningCasino) {
           forwardToCasino()
@@ -1735,33 +2054,39 @@ export default function App() {
           }
           return
         }
-
-        if (!s.showWithdrawModal && !s.isWithdrawing) {
-          handleMenuInput(button)
-        }
-
-        if (button === 6 && s.showWithdrawModal && !s.isWithdrawing) {
-          setShowWithdrawModalRef.current(false)
-          return
-        }
-
-        if (s.showWithdrawModal && !s.isWithdrawing) {
-          if (button === 'LEFT' || button === 'DOWN') {
-            minusWithdrawAmountRef.current()
-            return
-          }
-          if (button === 'RIGHT' || button === 'UP') {
-            addWithdrawAmountRef.current()
-            return
-          }
-          if (button === 7 || button === 0 || button === 1) {
-            submitWithdrawRef.current()
-            return
-          }
-        }
+        handleMenuInput(button)
         // ----------------------------
         // MENU INPUT
         // ----------------------------
+      }
+
+      if (payload.type === 'ACTION' && (s.showWithdrawModal || s.isWithdrawing)) {
+        switch (payload.action) {
+          case 'MENU': {
+            if (s.showWithdrawModal && !s.isWithdrawing) {
+              setShowWithdrawModalRef.current(false)
+            }
+            return
+          }
+          case 'BET_UP': {
+            if (s.showWithdrawModal) {
+              minusWithdrawAmountRef.current()
+            }
+            return
+          }
+          case 'BET_DOWN': {
+            if (s.showWithdrawModal) {
+              addWithdrawAmountRef.current()
+            }
+            return
+          }
+          case 'WITHDRAW': {
+            if (s.showWithdrawModal && !s.isWithdrawing) {
+              submitWithdrawRef.current()
+            }
+            return
+          }
+        }
       }
 
       if (!s.runningCasino) {
@@ -1773,18 +2098,24 @@ export default function App() {
         // --- WITHDRAW COMPLETE ---
         if (payload.type === 'WITHDRAW_DISPENSE') {
           minusBalance('hopper', payload.dispensed)
+          setWithdrawRemainingAmount(prev => Math.max(0, prev - Number(payload.dispensed ?? 0)))
           return
         }
 
         if (payload.type === 'WITHDRAW_COMPLETE') {
           setIsWithdrawingRef.current(false)
           setShowWithdrawModalRef.current(false)
+          flashUiNotice(`SUCCESSFULLY WITHDRAWN ${formatPeso(withdrawRequestedAmountRef.current)}`)
+          setWithdrawAmount(withdrawRequestedAmountRef.current || MIN)
+          withdrawRequestedAmountRef.current = 0
+          setWithdrawRequestedAmount(0)
+          setWithdrawRemainingAmount(0)
           return
         }
 
         if (payload.type === 'ACTION' && payload.action === 'MENU') {
           if (s.showWifiModal) {
-            setShowWifiModal(false)
+            closeWifiSettingsToSettings()
             return
           }
           if (s.showSettingsModal) {
@@ -1840,13 +2171,20 @@ export default function App() {
           }
         }
       } else if (payload.type === 'ACTION') {
+        if (payload.action === 'WITHDRAW') {
+          openCasinoWithdrawModal()
+          return
+        }
+
         forwardToCasino()
         if (payload.action === 'MENU') {
           if (s.showExitConfirmModal) {
             confirmExitRef.current()
             return
           }
-          requestExitConfirmRef.current('casino')
+          if (casinoMenuExitStateRef.current.canExit) {
+            requestExitConfirmRef.current('casino')
+          }
           return
         }
         if (s.showExitConfirmModal) {
@@ -1921,6 +2259,18 @@ export default function App() {
   function handleExitGame() {
     // if (!runningGame && !runningCasino) return
     closeExitConfirm()
+    setShowWithdrawModal(false)
+    setIsWithdrawing(false)
+    setWithdrawRequestedAmount(0)
+    setWithdrawRemainingAmount(0)
+    withdrawRequestedAmountRef.current = 0
+    setCasinoWithdrawState({
+      canOpen: false,
+      balance: 0,
+      isWithdrawing: false,
+      min: 20,
+      step: 20,
+    })
     setRunningGame(null)
     setRunningCasino(false)
     setRunningCasinoSrc(null)
@@ -1957,13 +2307,104 @@ export default function App() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (isNoInternetModalActive) {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          openOfflineNetworkFlow()
+          return
+        }
+
+        if (e.key.startsWith('Arrow') || e.key === 'Escape' || e.key === ' ' || e.key === 'Tab') {
+          e.preventDefault()
+        }
+        return
+      }
+
+      if (showWithdrawModal || isWithdrawing) {
+        switch (e.key) {
+          case 'Escape':
+            e.preventDefault()
+            if (!isWithdrawing) {
+              setShowWithdrawModal(false)
+            }
+            return
+          case 'ArrowLeft':
+          case 'ArrowDown':
+            e.preventDefault()
+            if (!isWithdrawing) {
+              minusWithdrawAmount()
+            }
+            return
+          case 'ArrowRight':
+          case 'ArrowUp':
+            e.preventDefault()
+            if (!isWithdrawing) {
+              addWithdrawAmount()
+            }
+            return
+          case 'Enter':
+            e.preventDefault()
+            if (!isWithdrawing) {
+              void submitWithdraw()
+            }
+            return
+          default:
+            return
+        }
+      }
+
+      if (showWifiModal) {
+        return
+      }
+
       if (e.key === 'Escape') {
+        if (showSettingsModal) {
+          closeSettingsModal()
+          return
+        }
+        if (devInputBypassEnabled) return
         const context: ExitConfirmContext = runningCasino ? 'casino' : 'menu'
         requestExitConfirm(context)
         return
       }
 
-      // if (isGameRunning()) return
+      if (showSettingsModal) {
+        switch (e.key) {
+          case 'ArrowUp':
+            setSelectedSettingsItem(prev =>
+              prev === 'volume'
+                ? 'shutdown'
+                : prev === 'network'
+                  ? 'volume'
+                  : prev === 'reboot'
+                    ? 'network'
+                    : 'reboot',
+            )
+            return
+          case 'ArrowDown':
+            setSelectedSettingsItem(prev =>
+              prev === 'volume'
+                ? 'network'
+                : prev === 'network'
+                  ? 'reboot'
+                  : prev === 'reboot'
+                    ? 'shutdown'
+                    : 'volume',
+            )
+            return
+          case 'ArrowLeft':
+          case 'ArrowRight':
+            if (selectedSettingsItem === 'volume') {
+              void adjustVolume(e.key === 'ArrowLeft' ? 'down' : 'up')
+            }
+            return
+          case 'Enter':
+            void handleSettingsAction()
+            return
+          default:
+            return
+        }
+      }
 
       switch (e.key) {
         case 'ArrowRight':
@@ -2020,14 +2461,139 @@ export default function App() {
     focus,
     handleSettingsAction,
     openSettingsModal,
+    closeSettingsModal,
     requestExitConfirm,
     runningCasino,
     canAffordGame,
     flashUiNotice,
     isSelectableGame,
     selectedGame,
+    selectedSettingsItem,
+    adjustVolume,
+    addWithdrawAmount,
+    minusWithdrawAmount,
+    openOfflineNetworkFlow,
+    showWithdrawModal,
+    isWithdrawing,
+    isNoInternetModalActive,
     settingsFocused,
     showSettingsModal,
+    submitWithdraw,
+    devInputBypassEnabled,
+    showWifiModal,
+  ])
+
+  useEffect(() => {
+    if (!devInputBypassEnabled) return
+
+    async function sendDevInput(payload: Record<string, unknown>) {
+      try {
+        await fetch('http://localhost:5174/dev-input', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+      } catch (error) {
+        console.error('[DEV INPUT] failed to forward payload', error)
+      }
+    }
+
+    function onDevKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      const tagName = target?.tagName?.toLowerCase()
+      if (tagName === 'input' || tagName === 'textarea' || target?.isContentEditable) return
+      if (event.repeat) return
+      if (piOfflineLockActive) {
+        return
+      }
+      if (showWithdrawModal || isWithdrawing) {
+        return
+      }
+      if (showWifiModal || showSettingsModal) return
+
+      switch (event.key) {
+        case 'w':
+        case 'W':
+          event.preventDefault()
+          void sendDevInput({ type: 'PLAYER', player: 'P1', button: 'UP' })
+          return
+        case 's':
+        case 'S':
+          event.preventDefault()
+          void sendDevInput({ type: 'PLAYER', player: 'P1', button: 'DOWN' })
+          return
+        case 'a':
+        case 'A':
+          event.preventDefault()
+          void sendDevInput({ type: 'PLAYER', player: 'P1', button: 'LEFT' })
+          return
+        case 'd':
+        case 'D':
+          event.preventDefault()
+          void sendDevInput({ type: 'PLAYER', player: 'P1', button: 'RIGHT' })
+          return
+        case ' ':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'SPIN' })
+          return
+        case 'q':
+        case 'Q':
+        case 'Escape':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'MENU' })
+          return
+        case 'c':
+        case 'C':
+          event.preventDefault()
+          void sendDevInput({ type: 'COIN', credits: 5 })
+          return
+        case 'v':
+        case 'V':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'WITHDRAW' })
+          return
+        case '-':
+        case '_':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'BET_DOWN' })
+          return
+        case '=':
+        case '+':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'BET_UP' })
+          return
+        case 'r':
+        case 'R':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'AUTO' })
+          return
+        case 't':
+        case 'T':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'TURBO' })
+          return
+        case 'b':
+        case 'B':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'BUY' })
+          return
+        case 'm':
+        case 'M':
+          event.preventDefault()
+          void sendDevInput({ type: 'ACTION', action: 'AUDIO' })
+          return
+      }
+    }
+
+    window.addEventListener('keydown', onDevKey)
+    return () => window.removeEventListener('keydown', onDevKey)
+  }, [
+    devInputBypassEnabled,
+    showSettingsModal,
+    showWifiModal,
+    showWithdrawModal,
+    isWithdrawing,
+    piOfflineLockActive,
   ])
 
   async function launch(game: Game) {
@@ -2396,11 +2962,12 @@ export default function App() {
           zIndex={99998}
         />
       )}
-      {networkStage === 'no-internet' && !showWifiModal && !hasLocalLink && (
+      {isNoInternetModalActive && (
         <NoInternetModal
-          onConnect={() => setShowWifiModal(true)}
+          onConnect={openOfflineNetworkFlow}
           wifiConnected={wifiConnected}
           currentSsid={wifiSsid}
+          elevated
         />
       )}
       {showWifiModal && (
@@ -2423,7 +2990,7 @@ export default function App() {
           selected={selectedSettingsItem}
           volumeLabel={volumeLabel}
           volumePercent={volumePercent}
-          offline={!hasLocalLinkRef.current}
+          offline={piOfflineLockActive}
         />
       )}
       {casinoLaunchError && (
@@ -2448,8 +3015,12 @@ export default function App() {
       {showWithdrawModal && (
         <WithdrawModal
           withdrawAmount={withdrawAmount}
-          balance={balance}
+          balance={activeWithdrawBalance}
           isWithdrawing={isWithdrawing}
+          requestedAmount={withdrawRequestedAmount}
+          remainingAmount={withdrawRemainingAmount}
+          maxWithdrawalAmount={maxSelectable >= MIN ? maxSelectable : null}
+          elevated={runningCasino}
           onAddAmount={addWithdrawAmount}
           onMinusAmount={minusWithdrawAmount}
           onCancel={() => setShowWithdrawModal(false)}
@@ -2463,9 +3034,7 @@ export default function App() {
           onConfirm={confirmExit}
         />
       )}
-      {selectedGame && (
-        <div className="scene-bg" style={{ backgroundImage: `url(${selectedGame.art})` }} />
-      )}
+      <div className="scene-bg" style={{ backgroundImage: `url(${selectedGameArt})` }} />
 
       {!runningCasino && (
         <div className="top-status-bar">
@@ -2526,6 +3095,29 @@ export default function App() {
             </div>
             <ArcadeShellVersionBadge deviceId={deviceId} />
           </div>
+          {piOfflineLockActive && runningGame?.type === 'arcade' && (
+            <div
+              style={{
+                position: 'fixed',
+                top: 86,
+                left: '50%',
+                transform: 'translateX(-50%)',
+                zIndex: 100001,
+                padding: '10px 18px',
+                borderRadius: 999,
+                background: 'rgba(0, 0, 0, 0.9)',
+                border: '1px solid rgba(255, 87, 87, 0.95)',
+                color: '#ffb0b0',
+                fontSize: 26,
+                fontWeight: 800,
+                letterSpacing: '0.16em',
+                textTransform: 'uppercase',
+                pointerEvents: 'none',
+              }}
+            >
+              Offline
+            </div>
+          )}
         </>
       )}
       {runningCasino && (
