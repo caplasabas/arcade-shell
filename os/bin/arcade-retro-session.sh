@@ -26,6 +26,7 @@ RETROARCH_RUNTIME_INPUT_CONFIG="${ARCADE_RETRO_RUNTIME_INPUT_CONFIG:-/tmp/arcade
 RETROARCH_MERGED_APPEND_CONFIG="${ARCADE_RETRO_MERGED_APPEND_CONFIG:-/tmp/arcade-retro-appendconfig.cfg}"
 RETROARCH_CLIENT_LOG="${ARCADE_RETRO_CLIENT_LOG:-/tmp/arcade-retroarch-client.log}"
 SESSION_LOG_TARGET="${ARCADE_RETRO_SESSION_TRACE_LOG:-/tmp/arcade-retro-session-trace.log}"
+SESSION_READY_FILE="${ARCADE_RETRO_READY_FILE:-/tmp/arcade-retro-session.ready}"
 VIRTUAL_EVENT_RETRIES="${ARCADE_RETRO_VIRTUAL_EVENT_RETRIES:-25}"
 VIRTUAL_EVENT_POLL_MS="${ARCADE_RETRO_VIRTUAL_EVENT_POLL_MS:-100}"
 RUNTIME_INPUT_CONFIG_ENABLE="${ARCADE_RETRO_RUNTIME_INPUT_CONFIG_ENABLE:-0}"
@@ -40,6 +41,7 @@ if [[ -z "$RETROARCH_CORE_PATH" || -z "$RETROARCH_ROM_PATH" ]]; then
 fi
 
 export DISPLAY="$DISPLAY_VALUE"
+rm -f "$SESSION_READY_FILE"
 log "starting display=$DISPLAY_VALUE core=$RETROARCH_CORE_PATH rom=$RETROARCH_ROM_PATH"
 
 wait_for_x_server() {
@@ -58,14 +60,15 @@ wait_for_x_server() {
 wait_for_x_server
 log "X server ready"
 
-xsetroot -solid black
-xset s off
-xset -dpms
-xset s noblank
+xsetroot -solid black >/dev/null 2>&1 || true
+xset s off >/dev/null 2>&1 || true
+xset -dpms >/dev/null 2>&1 || true
+xset s noblank >/dev/null 2>&1 || true
 
 unclutter_pid=""
 overlay_pid=""
 retroarch_pid=""
+session_ready_written="0"
 
 cleanup() {
   if [[ -n "$overlay_pid" ]]; then
@@ -97,6 +100,15 @@ run_as_arcade_user() {
     DBUS_SESSION_BUS_ADDRESS="$RETRO_DBUS_ADDRESS" \
     PULSE_SERVER="$RETRO_PULSE_SERVER" \
     "$@"
+}
+
+mark_session_ready() {
+  if [[ "$session_ready_written" == "1" ]]; then
+    return
+  fi
+  : >"$SESSION_READY_FILE"
+  session_ready_written="1"
+  log "session ready file written $SESSION_READY_FILE"
 }
 
 read -r screen_width screen_height <<EOF
@@ -341,6 +353,7 @@ launch_overlay_after_delay() {
   while [[ -n "$retroarch_pid" ]] && kill -0 "$retroarch_pid" >/dev/null 2>&1; do
     wait_for_overlay_state || return 0
     launch_overlay
+    mark_session_ready
     return
   done
 }
@@ -364,6 +377,8 @@ log "retroarch pid=$retroarch_pid"
 
 if [[ "$OVERLAY_ENABLE" != "0" ]]; then
   launch_overlay_after_delay &
+else
+  mark_session_ready
 fi
 
 wait "$retroarch_pid"

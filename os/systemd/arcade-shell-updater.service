@@ -13,7 +13,7 @@ Environment=ARCADE_SHELL_VERSION_FILE=/opt/arcade/os/.arcade-shell-version
 Environment=ARCADE_SHELL_UPDATER_DEST=/usr/local/bin/arcade-shell-updater.mjs
 Environment=ARCADE_SHELL_SYSTEMD_DIR=/etc/systemd/system
 Environment=ARCADE_SHELL_NETWORK_TIMEOUT_MS=20000
-Environment=ARCADE_SHELL_AUTO_UPDATE=1
+Environment=ARCADE_SHELL_AUTO_UPDATE=0
 Environment=ARCADE_SHELL_REBOOT_ON_UPDATE=0
 Environment=ARCADE_SHELL_START_DELAY_MS=0
 Environment=ARCADE_SHELL_IDLE_WAIT_MS=0

@@ -19,6 +19,7 @@ PermissionsStartOnly=true
 ExecStartPre=/opt/arcade/os/bin/arcade-audio-init.sh
 ExecStartPre=/usr/bin/rm -f /home/arcade1/.Xauthority-c /home/arcade1/.Xauthority-l
 ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp -ac
+TimeoutStopSec=8
 Restart=always
 RestartSec=2
 

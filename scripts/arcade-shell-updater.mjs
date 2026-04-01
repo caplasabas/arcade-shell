@@ -31,6 +31,15 @@ function normalizePathFragment(value) {
     .replace(/\/+$/, '')
 }
 
+function parseEnvInt(name, fallback) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === null) return fallback
+  const text = String(raw).trim()
+  if (!text) return fallback
+  const parsed = Number.parseInt(text, 10)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
 function toPublicStorageUrl(supabaseUrl, bucket, objectPath) {
   return `${normalizeUrl(supabaseUrl)}/storage/v1/object/public/${normalizePathFragment(
     bucket,
@@ -833,18 +842,9 @@ async function maybeRepairNativeHelpers(installDir) {
 }
 
 async function waitForCabinetIdle() {
-  const startDelayMs = Math.max(
-    0,
-    Number.parseInt(process.env.ARCADE_SHELL_START_DELAY_MS || '45000', 10) || 45000,
-  )
-  const idleWaitMs = Math.max(
-    0,
-    Number.parseInt(process.env.ARCADE_SHELL_IDLE_WAIT_MS || '180000', 10) || 180000,
-  )
-  const pollMs = Math.max(
-    1000,
-    Number.parseInt(process.env.ARCADE_SHELL_IDLE_POLL_MS || '5000', 10) || 5000,
-  )
+  const startDelayMs = Math.max(0, parseEnvInt('ARCADE_SHELL_START_DELAY_MS', 45000))
+  const idleWaitMs = Math.max(0, parseEnvInt('ARCADE_SHELL_IDLE_WAIT_MS', 180000))
+  const pollMs = Math.max(1000, parseEnvInt('ARCADE_SHELL_IDLE_POLL_MS', 5000))
   const idleCheckUrl =
     process.env.ARCADE_SHELL_IDLE_CHECK_URL || 'http://127.0.0.1:5174/arcade-life/overlay-state'
 

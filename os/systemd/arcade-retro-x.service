@@ -11,6 +11,7 @@ StandardInput=tty
 StandardOutput=journal
 StandardError=journal
 ExecStart=/usr/lib/xorg/Xorg :1 vt1 -nocursor -nolisten tcp -ac
+TimeoutStopSec=8
 Restart=always
 RestartSec=2
 

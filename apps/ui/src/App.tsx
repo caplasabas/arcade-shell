@@ -905,6 +905,14 @@ export default function App() {
       return
     }
 
+    if (runningGame || runningCasino) {
+      if (shellUpdateStableTimerRef.current !== null) {
+        window.clearTimeout(shellUpdateStableTimerRef.current)
+        shellUpdateStableTimerRef.current = null
+      }
+      return
+    }
+
     if (shellUpdateRequestedRef.current) return
 
     shellUpdateStableTimerRef.current = window.setTimeout(async () => {
@@ -962,7 +970,7 @@ export default function App() {
         shellUpdateStableTimerRef.current = null
       }
     }
-  }, [initialized, networkStage])
+  }, [initialized, networkStage, runningCasino, runningGame])
 
   useEffect(() => {
     if (bootFlowComplete) return
