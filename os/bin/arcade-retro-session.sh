@@ -12,7 +12,7 @@ OVERLAY_PORT="${ARCADE_RETRO_OVERLAY_PORT:-5174}"
 OVERLAY_PATH="${ARCADE_RETRO_OVERLAY_PATH:-/arcade-life/overlay-state}"
 OVERLAY_READY_RETRIES="${ARCADE_RETRO_OVERLAY_READY_RETRIES:-40}"
 OVERLAY_READY_POLL_MS="${ARCADE_RETRO_OVERLAY_READY_POLL_MS:-250}"
-RETROARCH_BIN="${ARCADE_RETRO_BIN:-retroarch}"
+RETROARCH_BIN="${ARCADE_RETRO_BIN:-/usr/bin/retroarch}"
 RETRO_RUN_USER="${ARCADE_RETRO_RUN_USER:-arcade1}"
 RETRO_RUN_HOME="${ARCADE_RETRO_RUN_HOME:-/home/${RETRO_RUN_USER}}"
 RETRO_XDG_RUNTIME_DIR="${ARCADE_RETRO_XDG_RUNTIME_DIR:-/run/user/1000}"
@@ -23,8 +23,12 @@ RETROARCH_ROM_PATH="${ARCADE_RETRO_ROM_PATH:-}"
 RETROARCH_CONFIG_PATH="${ARCADE_RETRO_CONFIG_PATH:-}"
 RETROARCH_APPEND_CONFIG="${ARCADE_RETRO_APPEND_CONFIG:-/opt/arcade/os/retroarch-single-x.cfg}"
 RETROARCH_RUNTIME_INPUT_CONFIG="${ARCADE_RETRO_RUNTIME_INPUT_CONFIG:-/tmp/arcade-retro-input-runtime.cfg}"
+RETROARCH_MERGED_APPEND_CONFIG="${ARCADE_RETRO_MERGED_APPEND_CONFIG:-/tmp/arcade-retro-appendconfig.cfg}"
 RETROARCH_CLIENT_LOG="${ARCADE_RETRO_CLIENT_LOG:-/tmp/arcade-retroarch-client.log}"
 SESSION_LOG_TARGET="${ARCADE_RETRO_SESSION_TRACE_LOG:-/tmp/arcade-retro-session-trace.log}"
+VIRTUAL_EVENT_RETRIES="${ARCADE_RETRO_VIRTUAL_EVENT_RETRIES:-25}"
+VIRTUAL_EVENT_POLL_MS="${ARCADE_RETRO_VIRTUAL_EVENT_POLL_MS:-100}"
+RUNTIME_INPUT_CONFIG_ENABLE="${ARCADE_RETRO_RUNTIME_INPUT_CONFIG_ENABLE:-0}"
 
 log() {
   printf '[arcade-retro-session] %s\n' "$*" | tee -a "$SESSION_LOG_TARGET" >&2
@@ -191,34 +195,88 @@ get_event_index_by_name() {
   return 1
 }
 
+get_virtual_event_poll_seconds() {
+  python3 - "$VIRTUAL_EVENT_POLL_MS" <<'PY'
+import sys
+value = 100
+try:
+    value = max(25, int(float(sys.argv[1])))
+except Exception:
+    value = 100
+print(f"{value / 1000:.3f}")
+PY
+}
+
+wait_for_event_index_by_name() {
+  local target_name="$1"
+  local retries="$2"
+  local poll_seconds
+  local attempt
+  local event_index=""
+
+  poll_seconds="$(get_virtual_event_poll_seconds)"
+
+  for attempt in $(seq 1 "$retries"); do
+    event_index="$(get_event_index_by_name "$target_name" || true)"
+    if [[ -n "$event_index" ]]; then
+      printf '%s\n' "$event_index"
+      return 0
+    fi
+    sleep "$poll_seconds"
+  done
+
+  return 1
+}
+
 write_runtime_input_config() {
-  local p1_event p2_event p1_index p2_index
-
-  p1_event="$(get_event_index_by_name 'Arcade Virtual P1' || true)"
-  p2_event="$(get_event_index_by_name 'Arcade Virtual P2' || true)"
-
-  if [[ -z "$p1_event" || -z "$p2_event" ]]; then
-    log "runtime input config skipped: virtual event nodes not found"
+  if [[ "$RUNTIME_INPUT_CONFIG_ENABLE" != "1" ]]; then
+    log "runtime input config disabled"
     rm -f "$RETROARCH_RUNTIME_INPUT_CONFIG"
     return
   fi
 
-  if (( p1_event < p2_event )); then
-    p1_index=0
-    p2_index=1
-  else
-    p1_index=1
-    p2_index=0
+  local p1_event p2_event
+
+  p1_event="$(wait_for_event_index_by_name 'Arcade Virtual P1' "$VIRTUAL_EVENT_RETRIES" || true)"
+  p2_event="$(wait_for_event_index_by_name 'Arcade Virtual P2' "$VIRTUAL_EVENT_RETRIES" || true)"
+
+  if [[ -z "$p1_event" || -z "$p2_event" ]]; then
+    log "runtime input config skipped: virtual event nodes not found after retries=${VIRTUAL_EVENT_RETRIES}"
+    rm -f "$RETROARCH_RUNTIME_INPUT_CONFIG"
+    return
   fi
 
   cat >"$RETROARCH_RUNTIME_INPUT_CONFIG" <<EOF
-input_player1_joypad_index = "$p1_index"
+input_player1_joypad_index = "-1"
 input_player1_reserved_device = "0000:0000 Arcade Virtual P1"
-input_player2_joypad_index = "$p2_index"
+input_player2_joypad_index = "-1"
 input_player2_reserved_device = "0000:0000 Arcade Virtual P2"
 EOF
 
-  log "runtime input config: P1 event=$p1_event index=$p1_index, P2 event=$p2_event index=$p2_index"
+  log "runtime input config: P1 event=$p1_event reserved=Arcade Virtual P1, P2 event=$p2_event reserved=Arcade Virtual P2"
+}
+
+write_merged_append_config() {
+  : >"$RETROARCH_MERGED_APPEND_CONFIG"
+
+  if [[ -n "$RETROARCH_APPEND_CONFIG" && -f "$RETROARCH_APPEND_CONFIG" ]]; then
+    cat "$RETROARCH_APPEND_CONFIG" >>"$RETROARCH_MERGED_APPEND_CONFIG"
+    printf '\n' >>"$RETROARCH_MERGED_APPEND_CONFIG"
+    log "including appendconfig=$RETROARCH_APPEND_CONFIG"
+  fi
+
+  if [[ -f "$RETROARCH_RUNTIME_INPUT_CONFIG" ]]; then
+    cat "$RETROARCH_RUNTIME_INPUT_CONFIG" >>"$RETROARCH_MERGED_APPEND_CONFIG"
+    printf '\n' >>"$RETROARCH_MERGED_APPEND_CONFIG"
+    log "including runtime input config=$RETROARCH_RUNTIME_INPUT_CONFIG"
+  fi
+
+  if [[ ! -s "$RETROARCH_MERGED_APPEND_CONFIG" ]]; then
+    rm -f "$RETROARCH_MERGED_APPEND_CONFIG"
+    return 1
+  fi
+
+  return 0
 }
 
 get_overlay_delay_seconds() {
@@ -291,14 +349,10 @@ retroarch_args=(--fullscreen --verbose)
 if [[ -n "$RETROARCH_CONFIG_PATH" ]]; then
   retroarch_args+=(--config "$RETROARCH_CONFIG_PATH")
 fi
-if [[ -n "$RETROARCH_APPEND_CONFIG" && -f "$RETROARCH_APPEND_CONFIG" ]]; then
-  retroarch_args+=(--appendconfig "$RETROARCH_APPEND_CONFIG")
-  log "using appendconfig=$RETROARCH_APPEND_CONFIG"
-fi
 write_runtime_input_config
-if [[ -f "$RETROARCH_RUNTIME_INPUT_CONFIG" ]]; then
-  retroarch_args+=(--appendconfig "$RETROARCH_RUNTIME_INPUT_CONFIG")
-  log "using runtime appendconfig=$RETROARCH_RUNTIME_INPUT_CONFIG"
+if write_merged_append_config; then
+  retroarch_args+=(--appendconfig "$RETROARCH_MERGED_APPEND_CONFIG")
+  log "using merged appendconfig=$RETROARCH_MERGED_APPEND_CONFIG"
 fi
 retroarch_args+=(--log-file "$RETROARCH_CLIENT_LOG")
 retroarch_args+=(-L "$RETROARCH_CORE_PATH" "$RETROARCH_ROM_PATH")

@@ -46,8 +46,9 @@ export type Game = {
 const GRID_ROWS = 3
 const GRID_VISIBLE_COLS = 4
 const EXIT_CONFIRM_WINDOW_MS = 2800
-const BOOT_UPDATER_NETWORK_GRACE_MS = 4500
-const AUTO_BOOT_UPDATE_CHECK = false
+const BOOT_UPDATER_NETWORK_GRACE_MS = 2500
+const BOOT_UPDATER_STABLE_NETWORK_MS = 5000
+const AUTO_BOOT_UPDATE_CHECK = true
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 
@@ -255,6 +256,7 @@ export default function App() {
     const fetchWithdrawLimits = async () => {
       try {
         const response = await fetch(`${API_BASE}/withdraw-limits`, { cache: 'no-store' })
+
         if (!response.ok) return
         const data = (await response.json().catch(() => null)) as {
           hopperBalance?: number | null
@@ -264,8 +266,7 @@ export default function App() {
         if (stopped || !data) return
 
         setWithdrawLimits({
-          hopperBalance:
-            typeof data.hopperBalance === 'number' ? Number(data.hopperBalance) : null,
+          hopperBalance: typeof data.hopperBalance === 'number' ? Number(data.hopperBalance) : null,
           maxWithdrawalAmount:
             typeof data.maxWithdrawalAmount === 'number' ? Number(data.maxWithdrawalAmount) : null,
           enabled: Boolean(data.enabled),
@@ -496,7 +497,6 @@ export default function App() {
     detail: null,
   })
   const shellUpdateRequestedRef = useRef(false)
-  const shellUpdateSkippedThisBootRef = useRef(false)
   const shellUpdateStableTimerRef = useRef<number | null>(null)
   const bootOverlayLabel = (
     shellUpdateOverlayStatus.label?.trim() ||
@@ -586,6 +586,12 @@ export default function App() {
 
   const recoverDeviceState = useCallback(
     async (reason: string) => {
+      if (networkStageRef.current !== 'ok') {
+        console.log(`[RECOVERY] Skipping auto re-init while offline (${reason})`)
+        setInitialized(false)
+        return
+      }
+
       if (recoveryInFlightRef.current) return
 
       recoveryInFlightRef.current = true
@@ -626,6 +632,7 @@ export default function App() {
         console.log(`[RECOVERY] Auto re-init complete (${reason})`)
       } catch (err) {
         console.error(`[RECOVERY] Auto re-init failed (${reason})`, err)
+        setInitialized(false)
       } finally {
         setLoading(false)
         recoveryInFlightRef.current = false
@@ -761,10 +768,7 @@ export default function App() {
   }, [])
 
   const isNoInternetModalActive =
-    piOfflineLockActive &&
-    !showWifiModal &&
-    !showSettingsModal &&
-    runningGame?.type !== 'arcade'
+    piOfflineLockActive && !showWifiModal && !showSettingsModal && runningGame?.type !== 'arcade'
 
   const openNetworkSettings = useCallback(() => {
     setShowSettingsModal(false)
@@ -866,14 +870,8 @@ export default function App() {
         setInitialized(true)
       } catch (err) {
         console.error('Boot failed', err)
-
-        // Keep the shell usable when the Pi still has a local network link but
-        // remote services are slow or temporarily unreachable.
-        setNetworkStage(
-          wifiConnectedRef.current || Boolean(ethernetIpRef.current) || Boolean(wifiIpRef.current)
-            ? 'ok'
-            : 'no-internet',
-        )
+        setInitialized(false)
+        setNetworkStage('no-internet')
       } finally {
         if (!cancelled) {
           setLoading(false)
@@ -907,12 +905,7 @@ export default function App() {
       return
     }
 
-    if (
-      bootFlowComplete ||
-      shellUpdateRequestedRef.current ||
-      shellUpdateSkippedThisBootRef.current
-    )
-      return
+    if (shellUpdateRequestedRef.current) return
 
     shellUpdateStableTimerRef.current = window.setTimeout(async () => {
       shellUpdateStableTimerRef.current = null
@@ -961,7 +954,7 @@ export default function App() {
         setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
         setBootFlowComplete(true)
       }
-    }, 2500)
+    }, BOOT_UPDATER_STABLE_NETWORK_MS)
 
     return () => {
       if (shellUpdateStableTimerRef.current !== null) {
@@ -969,16 +962,15 @@ export default function App() {
         shellUpdateStableTimerRef.current = null
       }
     }
-  }, [bootFlowComplete, initialized, networkStage])
+  }, [initialized, networkStage])
 
   useEffect(() => {
     if (bootFlowComplete) return
 
     const timer = window.setTimeout(() => {
-      if (shellUpdateRequestedRef.current || shellUpdateSkippedThisBootRef.current) return
+      if (shellUpdateRequestedRef.current) return
       if (networkStageRef.current === 'ok') return
 
-      shellUpdateSkippedThisBootRef.current = true
       setShellUpdateOverlayVisible(false)
       setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
       setBootFlowComplete(true)
@@ -1027,6 +1019,8 @@ export default function App() {
   const runtimeInfoSyncKeyRef = useRef('')
   useEffect(() => {
     if (!deviceId) return
+    if (!initialized) return
+    if (networkStage !== 'ok') return
 
     const payload = {
       device_id: deviceId,
@@ -1053,10 +1047,12 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [currentIp, deviceId, shellVersion])
+  }, [currentIp, deviceId, initialized, networkStage, shellVersion])
 
   useEffect(() => {
     if (!deviceId) return
+    if (!initialized) return
+    if (networkStage !== 'ok') return
 
     async function load() {
       if (!deviceId) return
@@ -1102,7 +1098,7 @@ export default function App() {
       unsubGames()
       unsubCabinet()
     }
-  }, [deviceId, findFirstSelectableGameIndex, isSelectableGame, runningGame])
+  }, [deviceId, findFirstSelectableGameIndex, initialized, isSelectableGame, networkStage, runningGame])
 
   useEffect(() => {
     if (!deviceId) return
@@ -1272,11 +1268,19 @@ export default function App() {
   const MIN = 20
   const activeWithdrawBalance = runningCasino ? casinoWithdrawState.balance : balance
   const getMaxSelectable = (balance: number) => {
-    const cappedBalance =
-      typeof withdrawLimits.maxWithdrawalAmount === 'number'
-        ? Math.min(balance, withdrawLimits.maxWithdrawalAmount)
-        : balance
-    return Math.floor(Math.max(0, cappedBalance) / STEP) * STEP
+    let capped = Math.max(0, balance)
+
+    // server max cap
+    if (typeof withdrawLimits.maxWithdrawalAmount === 'number') {
+      capped = Math.min(capped, withdrawLimits.maxWithdrawalAmount)
+    }
+
+    // hopper constraint (only when enabled)
+    if (typeof withdrawLimits.hopperBalance === 'number') {
+      capped = Math.min(capped, withdrawLimits.hopperBalance)
+    }
+
+    return Math.floor(capped / STEP) * STEP
   }
   const isValidWithdrawAmount = (amount: number, balanceValue: number) => {
     if (!Number.isFinite(amount)) return false
@@ -1284,6 +1288,7 @@ export default function App() {
     return amount >= MIN && amount <= max && amount % STEP === 0
   }
   const maxSelectable = getMaxSelectable(activeWithdrawBalance)
+
   const isWithdrawDisabled = maxSelectable < MIN
 
   const addWithdrawAmount = () => {
@@ -1305,12 +1310,20 @@ export default function App() {
     if (!showWithdrawModal) return
     if (isWithdrawDisabled) return
     const max = getMaxSelectable(activeWithdrawBalance)
+
     setWithdrawAmount(prev => {
       const normalized = Math.floor(prev / STEP) * STEP
       const withMin = Math.max(MIN, normalized)
       return Math.min(withMin, max)
     })
-  }, [showWithdrawModal, isWithdrawDisabled, activeWithdrawBalance, withdrawLimits.maxWithdrawalAmount])
+  }, [
+    showWithdrawModal,
+    isWithdrawDisabled,
+    activeWithdrawBalance,
+    withdrawLimits.maxWithdrawalAmount,
+    withdrawLimits.hopperBalance,
+    withdrawLimits.enabled,
+  ])
 
   const submitWithdraw = useCallback(async () => {
     if (!hasLocalLinkRef.current) {
@@ -1350,6 +1363,27 @@ export default function App() {
       flashUiNotice('WITHDRAW FAILED')
     }
   }, [activeWithdrawBalance, flashUiNotice, isWithdrawing, withdrawAmount])
+
+  const finalizeWithdrawFlow = useCallback(
+    (dispensedAmount: number) => {
+      const actualDispensed = Math.max(0, Math.floor(Number(dispensedAmount || 0) / STEP) * STEP)
+
+      setIsWithdrawingRef.current(false)
+      setShowWithdrawModalRef.current(false)
+
+      if (actualDispensed > 0) {
+        flashUiNotice(`SUCCESSFULLY WITHDRAWN ${formatPeso(actualDispensed)}`)
+      } else {
+        flashUiNotice('WITHDRAW FAILED')
+      }
+
+      setWithdrawAmount(withdrawRequestedAmountRef.current || MIN)
+      withdrawRequestedAmountRef.current = 0
+      setWithdrawRequestedAmount(0)
+      setWithdrawRemainingAmount(0)
+    },
+    [flashUiNotice],
+  )
 
   const openCasinoWithdrawModal = useCallback(() => {
     if (!hasLocalLinkRef.current) {
@@ -1418,18 +1452,41 @@ export default function App() {
       })
     }
 
-    preparedCasinoVersionRef.current = {}
-    await recoverDeviceState('device-admin-reset')
-    setTransitionOverlay({
-      visible: false,
-      label: 'Loading Game...',
-      detail: null,
+    setWithdrawRequestedAmount(0)
+    setWithdrawRemainingAmount(0)
+    withdrawRequestedAmountRef.current = 0
+    setIsWithdrawing(false)
+    setCasinoWithdrawState({
+      canOpen: false,
+      balance: 0,
+      isWithdrawing: false,
+      min: 20,
+      step: 20,
     })
+    setInitialized(false)
+
+    preparedCasinoVersionRef.current = {}
+
+    try {
+      setTransitionOverlay({
+        visible: true,
+        label: 'Restarting Device...',
+        detail: 'Applying reset and rebooting cabinet',
+      })
+      await executeLocalPowerCommand('restart')
+    } catch (error) {
+      console.error('[RESET] local reboot request failed', error)
+      setTransitionOverlay({
+        visible: false,
+        label: 'Loading Game...',
+        detail: null,
+      })
+    }
   }, [
     applyAuthoritativeBalance,
     closeExitConfirm,
     closeSettingsModal,
-    recoverDeviceState,
+    executeLocalPowerCommand,
     resetPendingBalance,
   ])
 
@@ -1505,6 +1562,7 @@ export default function App() {
   useEffect(() => {
     if (!deviceId) return
     if (!initialized) return
+    if (networkStage !== 'ok') return
 
     let cancelled = false
 
@@ -1555,7 +1613,7 @@ export default function App() {
       window.clearInterval(poll)
       void supabase.removeChannel(channel)
     }
-  }, [deviceId, initialized, processAdminCommand])
+  }, [deviceId, initialized, networkStage, processAdminCommand])
 
   const confirmExit = useCallback(() => {
     closeExitConfirm()
@@ -1841,7 +1899,7 @@ export default function App() {
         return
       }
 
-      if (!payload || !s.initialized) return
+      if (!payload) return
 
       if (s.piOfflineLockActive && payload.type === 'COIN') {
         return
@@ -1955,13 +2013,7 @@ export default function App() {
 
         if (payload.type === 'WITHDRAW_COMPLETE') {
           forwardToCasino()
-          setIsWithdrawingRef.current(false)
-          setShowWithdrawModalRef.current(false)
-          flashUiNotice(`SUCCESSFULLY WITHDRAWN ${formatPeso(withdrawRequestedAmountRef.current)}`)
-          setWithdrawAmount(withdrawRequestedAmountRef.current || MIN)
-          withdrawRequestedAmountRef.current = 0
-          setWithdrawRequestedAmount(0)
-          setWithdrawRemainingAmount(0)
+          finalizeWithdrawFlow(payload.dispensed)
           return
         }
       }
@@ -2089,6 +2141,8 @@ export default function App() {
         }
       }
 
+      if (!s.initialized) return
+
       if (!s.runningCasino) {
         if (payload.type === 'COIN') {
           addBalance('coin', payload.credits)
@@ -2103,13 +2157,7 @@ export default function App() {
         }
 
         if (payload.type === 'WITHDRAW_COMPLETE') {
-          setIsWithdrawingRef.current(false)
-          setShowWithdrawModalRef.current(false)
-          flashUiNotice(`SUCCESSFULLY WITHDRAWN ${formatPeso(withdrawRequestedAmountRef.current)}`)
-          setWithdrawAmount(withdrawRequestedAmountRef.current || MIN)
-          withdrawRequestedAmountRef.current = 0
-          setWithdrawRequestedAmount(0)
-          setWithdrawRemainingAmount(0)
+          finalizeWithdrawFlow(payload.dispensed)
           return
         }
 
@@ -3019,7 +3067,7 @@ export default function App() {
           isWithdrawing={isWithdrawing}
           requestedAmount={withdrawRequestedAmount}
           remainingAmount={withdrawRemainingAmount}
-          maxWithdrawalAmount={maxSelectable >= MIN ? maxSelectable : null}
+          maxSelectableAmount={maxSelectable >= MIN ? maxSelectable : 0}
           elevated={runningCasino}
           onAddAmount={addWithdrawAmount}
           onMinusAmount={minusWithdrawAmount}

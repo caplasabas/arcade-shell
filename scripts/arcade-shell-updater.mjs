@@ -764,26 +764,44 @@ async function maybeBuildRemoteHelper(installDir) {
     throw new Error('no C compiler found for native helpers (need cc, gcc, or clang)')
   }
 
+  const buildNativeBinary = async (sourcePath, targetPath, preArgs, postArgs, label) => {
+    const tmpTarget = `${targetPath}.tmp`
+    await fsp.rm(tmpTarget, { force: true })
+
+    try {
+      run(compiler, [...preArgs, '-o', tmpTarget, sourcePath, ...postArgs])
+      const stats = await fsp.stat(tmpTarget)
+      if (!stats.isFile() || stats.size <= 0) {
+        throw new Error(`${label} build produced empty output`)
+      }
+      await fsp.chmod(tmpTarget, 0o755)
+      await fsp.rename(tmpTarget, targetPath)
+    } catch (error) {
+      await fsp.rm(tmpTarget, { force: true }).catch(() => {})
+      throw error
+    }
+  }
+
   if (await fileExists(helperSource)) {
     console.log('[arcade-shell-updater] building uinput-helper')
-    run(compiler, ['-O2', '-s', '-Wall', '-Wextra', '-o', helperTarget, helperSource])
-    await fsp.chmod(helperTarget, 0o755)
+    await buildNativeBinary(
+      helperSource,
+      helperTarget,
+      ['-O2', '-s', '-Wall', '-Wextra'],
+      [],
+      'uinput-helper',
+    )
   }
 
   if (await fileExists(overlaySource)) {
     console.log('[arcade-shell-updater] building native retro overlay')
-    run(compiler, [
-      '-O2',
-      '-s',
-      '-Wall',
-      '-Wextra',
-      '-o',
-      overlayTarget,
+    await buildNativeBinary(
       overlaySource,
-      '-lX11',
-      '-lXext',
-    ])
-    await fsp.chmod(overlayTarget, 0o755)
+      overlayTarget,
+      ['-O2', '-s', '-Wall', '-Wextra'],
+      ['-lX11', '-lXext'],
+      'arcade-retro-overlay',
+    )
   }
 }
 
@@ -793,8 +811,19 @@ async function maybeRepairNativeHelpers(installDir) {
   const overlaySource = path.join(installDir, 'bin', 'arcade-retro-overlay.c')
   const overlayTarget = path.join(installDir, 'bin', 'arcade-retro-overlay')
 
-  const needsHelperRepair = (await fileExists(helperSource)) && !(await fileExists(helperTarget))
-  const needsOverlayRepair = (await fileExists(overlaySource)) && !(await fileExists(overlayTarget))
+  const hasNonEmptyFile = async targetPath => {
+    try {
+      const stats = await fsp.stat(targetPath)
+      return stats.isFile() && stats.size > 0
+    } catch {
+      return false
+    }
+  }
+
+  const needsHelperRepair =
+    (await fileExists(helperSource)) && !(await hasNonEmptyFile(helperTarget))
+  const needsOverlayRepair =
+    (await fileExists(overlaySource)) && !(await hasNonEmptyFile(overlayTarget))
 
   if (!needsHelperRepair && !needsOverlayRepair) return false
 

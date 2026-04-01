@@ -962,3 +962,7 @@ button:focus-visible {
     padding: 3px 6px;
     pointer-events: none;
 }
+
+.withdraw-offline {
+    opacity: 0.4;
+}

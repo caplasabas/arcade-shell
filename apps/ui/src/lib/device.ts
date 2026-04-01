@@ -87,6 +87,7 @@ export async function clearDeviceRuntimeState(deviceId: string) {
     .from('devices')
     .update({
       balance: 0,
+      hopper_balance: 0,
       coins_in_total: 0,
       hopper_in_total: 0,
       hopper_out_total: 0,

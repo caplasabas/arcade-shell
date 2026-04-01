@@ -342,7 +342,7 @@ if [[ "\$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
   sudo_cmd install -D -m 0755 "\$build_tmp" "\$PI_REMOTE_RUNTIME_BIN_DIR/uinput-helper"
 
   echo "[pi-sync:remote] Building and installing native overlay -> \$PI_REMOTE_RUNTIME_BIN_DIR/arcade-retro-overlay"
-  overlay_tmp="\$PI_REMOTE_STAGE_DIR/bin/arcade-retro-overlay"
+  overlay_tmp="\$PI_REMOTE_STAGE_DIR/bin/arcade-retro-overlay.tmp"
   "\$compiler" \
     -O2 \
     -s \
@@ -352,7 +352,12 @@ if [[ "\$PI_BUILD_UINPUT_HELPER" == "1" ]]; then
     "\$PI_REMOTE_STAGE_DIR/bin/arcade-retro-overlay.c" \
     -lX11 \
     -lXext
+  if [[ ! -s "\$overlay_tmp" ]]; then
+    echo "[pi-sync:remote] overlay build produced empty output" >&2
+    exit 1
+  fi
   sudo_cmd install -D -m 0755 "\$overlay_tmp" "\$PI_REMOTE_RUNTIME_BIN_DIR/arcade-retro-overlay"
+  rm -f "\$overlay_tmp"
 fi
 
 if [[ "\$PI_SYNC_UPDATER" == "1" && -f "\$PI_REMOTE_STAGE_DIR/scripts/arcade-shell-updater.mjs" ]]; then

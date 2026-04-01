@@ -265,6 +265,7 @@ const RETROARCH_DBUS_ADDRESS =
   process.env.RETROARCH_DBUS_ADDRESS || `unix:path=${RETROARCH_RUNTIME_DIR}/bus`
 const RETROARCH_PULSE_SERVER =
   process.env.RETROARCH_PULSE_SERVER || `unix:${RETROARCH_RUNTIME_DIR}/pulse/native`
+const RETROARCH_BIN = process.env.ARCADE_RETRO_BIN || '/usr/bin/retroarch'
 const RETROARCH_USE_DBUS_RUN_SESSION = process.env.RETROARCH_USE_DBUS_RUN_SESSION === '1'
 const RETROARCH_PRIMARY_INPUT = String(process.env.RETROARCH_PRIMARY_INPUT || 'P1').toUpperCase()
 const CASINO_MENU_EXITS_RETROARCH = process.env.CASINO_MENU_EXITS_RETROARCH !== '0'
@@ -457,21 +458,22 @@ function stopArcadeUiForRetroarch() {
   console.log('[UI] stop requested before tty X RetroArch launch')
 }
 
-function restartArcadeUiAfterRetroarch(reason) {
+function restartArcadeUiAfterRetroarch(reason, forceRestart = false) {
   if (!RETROARCH_TTY_X_SESSION) return
-  if (KEEP_UI_ALIVE_DURING_TTY_X) {
+  if (KEEP_UI_ALIVE_DURING_TTY_X && !forceRestart) {
     console.log(`[UI] arcade-ui.service kept alive during tty X RetroArch session (${reason})`)
     return
   }
-  if (!arcadeUiStoppedForRetroarch) return
+  if (!forceRestart && !arcadeUiStoppedForRetroarch) return
 
   arcadeUiStoppedForRetroarch = false
-  const proc = spawn('systemctl', ['start', '--no-block', 'arcade-ui.service'], {
+  const action = forceRestart ? 'restart' : 'start'
+  const proc = spawn('systemctl', [action, '--no-block', 'arcade-ui.service'], {
     detached: true,
     stdio: 'ignore',
   })
   proc.unref()
-  console.log(`[UI] start requested after tty X RetroArch exit (${reason})`)
+  console.log(`[UI] ${action} requested after tty X RetroArch exit (${reason})`)
 }
 
 function ensureRetroXWarm(reason = 'boot') {
@@ -664,6 +666,7 @@ Start Guard : ${RETROARCH_START_INPUT_GUARD_MS}ms
 Exit Confirm: ${RETROARCH_EXIT_CONFIRM_WINDOW_MS}ms
 Exit Cooldown: ${RETROARCH_POST_EXIT_LAUNCH_COOLDOWN_MS}ms
 RA Config   : ${RETROARCH_CONFIG_PATH || '(default)'}
+RA Binary   : ${RETROARCH_BIN}
 RA OSD Cmd  : ${ARCADE_RETRO_OSD_ENABLED ? RETROARCH_OSD_COMMAND : 'disabled'} (${ARCADE_RETRO_OSD_COOLDOWN_MS}ms)
 RA OSD Retry: ${ARCADE_RETRO_OSD_RETRY_COUNT}x/${ARCADE_RETRO_OSD_RETRY_INTERVAL_MS}ms
 RA OSD Prompt: ${ARCADE_RETRO_OSD_PROMPT_PERSIST ? `on/${ARCADE_RETRO_OSD_PROMPT_INTERVAL_MS}ms` : 'off'} (${ARCADE_RETRO_OSD_PROMPT_BLINK ? 'blink' : 'steady'})
@@ -799,7 +802,10 @@ async function recordWithdrawalDispense(amount) {
   const context = activeWithdrawalContext
   const requestId = context?.requestId || `withdraw-${Date.now()}`
   const requestedAmount = toMoney(context?.requestedAmount, dispenseAmount)
-  const nextDispensedTotal = toMoney((context?.dispensedTotal || 0) + dispenseAmount, dispenseAmount)
+  const nextDispensedTotal = toMoney(
+    (context?.dispensedTotal || 0) + dispenseAmount,
+    dispenseAmount,
+  )
 
   if (context) {
     context.dispensedTotal = nextDispensedTotal
@@ -814,44 +820,26 @@ async function recordWithdrawalDispense(amount) {
   }
 
   try {
-    const metricResponse = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`, {
-      method: 'POST',
-      headers: getSupabaseHeaders(),
-      timeoutMs: 3500,
-      body: {
-        p_device_id: DEVICE_ID,
-        p_event_type: 'withdrawal',
-        p_amount: dispenseAmount,
-        p_event_ts: eventTs,
-        p_metadata: metadata,
-        p_write_ledger: true,
+    const metricResponse = await requestJsonWithCurl(
+      `${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`,
+      {
+        method: 'POST',
+        headers: getSupabaseHeaders(),
+        timeoutMs: 3500,
+        body: {
+          p_device_id: DEVICE_ID,
+          p_event_type: 'withdrawal',
+          p_amount: dispenseAmount,
+          p_event_ts: eventTs,
+          p_metadata: metadata,
+          p_write_ledger: true,
+        },
       },
-    })
+    )
 
     if (!metricResponse.ok) {
-      throw new Error(`metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim())
-    }
-
-    const ledgerResponse = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/device_ledger`, {
-      method: 'POST',
-      headers: {
-        ...getSupabaseHeaders(),
-        Prefer: 'return=minimal',
-      },
-      timeoutMs: 3500,
-      body: {
-        device_id: DEVICE_ID,
-        type: 'withdrawal',
-        amount: dispenseAmount,
-        balance_delta: -dispenseAmount,
-        source: 'hopper',
-        metadata,
-      },
-    })
-
-    if (!ledgerResponse.ok) {
       throw new Error(
-        `ledger insert failed (${ledgerResponse.status}) ${ledgerResponse.text || ''}`.trim(),
+        `metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim(),
       )
     }
   } catch (error) {
@@ -873,22 +861,27 @@ async function recordHopperTopup(amount) {
   }
 
   try {
-    const metricResponse = await requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`, {
-      method: 'POST',
-      headers: getSupabaseHeaders(),
-      timeoutMs: 3500,
-      body: {
-        p_device_id: DEVICE_ID,
-        p_event_type: 'hopper_in',
-        p_amount: topupAmount,
-        p_event_ts: eventTs,
-        p_metadata: metadata,
-        p_write_ledger: true,
+    const metricResponse = await requestJsonWithCurl(
+      `${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`,
+      {
+        method: 'POST',
+        headers: getSupabaseHeaders(),
+        timeoutMs: 3500,
+        body: {
+          p_device_id: DEVICE_ID,
+          p_event_type: 'hopper_in',
+          p_amount: topupAmount,
+          p_event_ts: eventTs,
+          p_metadata: metadata,
+          p_write_ledger: true,
+        },
       },
-    })
+    )
 
     if (!metricResponse.ok) {
-      throw new Error(`metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim())
+      throw new Error(
+        `metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim(),
+      )
     }
   } catch (error) {
     console.error('[HOPPER] topup accounting failed', {
@@ -1985,12 +1978,12 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
           startArcadeContinueCountdown(player)
         }, 1200)
       }
-    broadcastArcadeLifeState('denied', {
-      player,
-      denyReason: result.reason,
-      balance: resolvedBalance,
+      broadcastArcadeLifeState('denied', {
+        player,
+        denyReason: result.reason,
+        balance: resolvedBalance,
+      })
     })
-  })
     .catch(err => {
       if (arcadeSession?.active && arcadeSession === sessionRef) {
         sessionRef.purchaseInFlight[player] = false
@@ -2384,6 +2377,7 @@ function triggerArcadeShellUpdate(reason = 'manual') {
 
   child.on('error', err => {
     arcadeShellUpdateChild = null
+    arcadeShellUpdateTriggered = false
     setArcadeShellUpdateState({
       status: 'failed',
       finishedAt: new Date().toISOString(),
@@ -2394,6 +2388,7 @@ function triggerArcadeShellUpdate(reason = 'manual') {
 
   child.on('exit', code => {
     arcadeShellUpdateChild = null
+    arcadeShellUpdateTriggered = false
     setArcadeShellUpdateState({
       status: code === 0 ? 'completed' : 'failed',
       finishedAt: new Date().toISOString(),
@@ -2826,11 +2821,6 @@ function routePlayerInput(source, index, value) {
     if (!player) return
     const playerAction = JOYSTICK_BUTTON_MAP[index]
 
-    if (value === 1 && playerAction === 'MENU' && CASINO_MENU_EXITS_RETROARCH) {
-      handleRetroarchMenuExitIntent()
-      return
-    }
-
     const hasStoredCredit = playerHasStoredCredit(player)
     const needsCredit = !hasStoredCredit
 
@@ -2910,6 +2900,11 @@ function routePlayerInput(source, index, value) {
         sendVirtual(target, EV_KEY, keyCode, value)
         return
       }
+    }
+
+    if (value === 1 && playerAction === 'MENU' && !isStartButton(index) && CASINO_MENU_EXITS_RETROARCH) {
+      handleRetroarchMenuExitIntent()
+      return
     }
 
     if (value === 1 && shouldPromoteArcadeSessionToLive(player, index)) {
@@ -3109,8 +3104,12 @@ function refreshArcadeOsdMessage() {
 }
 
 function maybeRestartUiAfterExit(reason) {
+  const abnormalExit =
+    typeof reason === 'string' &&
+    (reason.includes('crash') || reason.includes('segfault') || reason.includes('abnormal'))
+
   if (RETROARCH_TTY_X_SESSION) {
-    restartArcadeUiAfterRetroarch(reason)
+    restartArcadeUiAfterRetroarch(reason, abnormalExit)
     return
   }
   if (!IS_PI || !RETROARCH_USE_TTY_MODE || !RESTART_UI_ON_EXIT || shuttingDown) return
@@ -3157,6 +3156,9 @@ function finalizeRetroarchExit(reason) {
 
   const wasActive = retroarchActive
   const targetUiVT = getTargetUiVT()
+  const abnormalExit =
+    typeof reason === 'string' &&
+    (reason.includes('crash') || reason.includes('segfault') || reason.includes('abnormal'))
   clearRetroarchStopTimers()
   clearRetroarchExitConfirm()
   retroarchActive = false
@@ -3179,6 +3181,10 @@ function finalizeRetroarchExit(reason) {
     switchToVTWithRetry(targetUiVT, reason)
     setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-post`), 120)
     scheduleForceSwitchToUI(`${reason}-detached`)
+    if (abnormalExit) {
+      setTimeout(() => switchToVTWithRetry(targetUiVT, `${reason}-crash-retry`, 8, 250), 300)
+      setTimeout(() => maybeRestartUiAfterExit(`${reason}-crash-ui-restart`), 400)
+    }
   }
 
   if (wasActive) {
@@ -3533,6 +3539,27 @@ function scheduleSystemPowerAction(action) {
   }, 400)
 }
 
+function scheduleManagedServiceRestart(serviceName, delayMs = 400) {
+  const safeServiceName = String(serviceName || '').trim()
+  if (!safeServiceName) return
+
+  console.log(`[SYSTEM] restart requested for ${safeServiceName}`)
+
+  setTimeout(() => {
+    if (!IS_PI) {
+      console.log(`[SYSTEM] restart simulated for ${safeServiceName} (compat mode)`)
+      return
+    }
+
+    const restartCommand = `sleep 0.5; systemctl restart ${safeServiceName}`
+    const proc = spawn('sh', ['-lc', restartCommand], {
+      stdio: 'ignore',
+      detached: true,
+    })
+    proc.unref()
+  }, delayMs)
+}
+
 function getPackageKey() {
   const keyHex = process.env.GAME_PACKAGE_KEY_HEX || ''
   if (!/^[a-fA-F0-9]{64}$/.test(keyHex)) return null
@@ -3587,7 +3614,9 @@ async function probeCompatEntryUrl(entryUrl) {
 async function resolveCompatGamePackageEntry({ id, packageUrl }) {
   if (IS_PI) return null
 
-  const gameId = String(id || '').trim().toLowerCase()
+  const gameId = String(id || '')
+    .trim()
+    .toLowerCase()
   const candidates = []
   const gameSpecificEnv = process.env[getDevCasinoEntryEnvKey(gameId)]
   if (gameSpecificEnv) candidates.push(gameSpecificEnv)
@@ -3837,22 +3866,24 @@ function getNetworkInfo() {
     const entries = Object.entries(nets)
       .map(([name, list]) => ({
         name,
-        ipv4: (list || []).find(entry => entry && entry.family === 'IPv4' && !entry.internal) || null,
+        ipv4:
+          (list || []).find(entry => entry && entry.family === 'IPv4' && !entry.internal) || null,
       }))
       .filter(entry => entry.ipv4)
 
     const wifiEntry =
       entries.find(entry => /^(wi-?fi|wlan|wl|airport|en0)$/i.test(entry.name)) || null
     const ethernetEntry =
-      entries.find(entry => entry.name !== wifiEntry?.name && /^(eth|en|bridge|lan)/i.test(entry.name)) ||
-      null
+      entries.find(
+        entry => entry.name !== wifiEntry?.name && /^(eth|en|bridge|lan)/i.test(entry.name),
+      ) || null
     const fallbackEntry = entries[0] || null
 
     return {
-      ethernet: ethernetEntry?.ipv4?.address || (!wifiEntry ? fallbackEntry?.ipv4?.address || null : null),
+      ethernet:
+        ethernetEntry?.ipv4?.address || (!wifiEntry ? fallbackEntry?.ipv4?.address || null : null),
       wifi: wifiEntry?.ipv4?.address || null,
-      ethernet_name:
-        ethernetEntry?.name || (!wifiEntry ? fallbackEntry?.name || null : null),
+      ethernet_name: ethernetEntry?.name || (!wifiEntry ? fallbackEntry?.name || null : null),
       wifi_name: wifiEntry?.name || null,
     }
   }
@@ -4013,11 +4044,11 @@ const server = http.createServer((req, res) => {
           IS_PI && hasSupabaseRpcConfig() ? await fetchDeviceFinancialState(DEVICE_ID) : null
         const balance = toMoney(state?.balance, 0)
         const hopperBalance = toMoney(state?.hopperBalance, 0)
-        const configuredMax = state
-          ? getMaxWithdrawalAmountForHopperBalance(hopperBalance)
-          : null
+        const configuredMax = state ? getMaxWithdrawalAmountForHopperBalance(hopperBalance) : null
         const maxWithdrawalAmount =
-          configuredMax === null ? null : Math.max(0, Math.min(balance, hopperBalance, configuredMax))
+          configuredMax === null
+            ? null
+            : Math.max(0, Math.min(balance, hopperBalance, configuredMax))
 
         return sendJson(res, 200, {
           success: true,
@@ -4621,6 +4652,17 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  if (req.method === 'POST' && req.url === '/system/restart-input') {
+    try {
+      sendJson(res, 200, { success: true, service: 'arcade-input.service', scheduled: true })
+      scheduleManagedServiceRestart('arcade-input.service')
+    } catch (error) {
+      console.error('[SYSTEM] input restart failed', error)
+      return sendJson(res, 500, { success: false, error: 'INPUT_RESTART_FAILED' })
+    }
+    return
+  }
+
   if (req.method === 'POST' && req.url === '/system/shutdown') {
     let body = ''
     req.on('data', chunk => {
@@ -5004,6 +5046,7 @@ const server = http.createServer((req, res) => {
             `ARCADE_RETRO_XDG_RUNTIME_DIR=${RETROARCH_RUNTIME_DIR}`,
             `ARCADE_RETRO_DBUS_ADDRESS=${RETROARCH_DBUS_ADDRESS}`,
             `ARCADE_RETRO_PULSE_SERVER=${RETROARCH_PULSE_SERVER}`,
+            `ARCADE_RETRO_BIN=${RETROARCH_BIN}`,
             `ARCADE_RETRO_SWITCH_TO_VT=${GAME_VT}`,
             `ARCADE_RETRO_PREWARMED_X=${RETROARCH_TTY_X_PREWARM ? '1' : '0'}`,
             `ARCADE_RETRO_CORE_PATH=${core.path}`,
@@ -5015,7 +5058,7 @@ const server = http.createServer((req, res) => {
           console.log('[LAUNCH] tty-x-session argv', launchArgs)
         } else {
           if (RETROARCH_USE_DBUS_RUN_SESSION) command.push('dbus-run-session', '--')
-          command.push('retroarch', '--fullscreen', '--verbose')
+          command.push(RETROARCH_BIN, '--fullscreen', '--verbose')
 
           if (RETROARCH_CONFIG_PATH) {
             command.push('--config', RETROARCH_CONFIG_PATH)
@@ -5042,7 +5085,13 @@ const server = http.createServer((req, res) => {
 
         retroarchProcess.on('exit', (code, signal) => {
           console.log(`[PROCESS] RetroArch exited code=${code} signal=${signal}`)
-          finalizeRetroarchExit('normal-exit')
+          const abnormal =
+            code !== 0 &&
+            code !== 130 &&
+            code !== 143 &&
+            signal !== 'SIGINT' &&
+            signal !== 'SIGTERM'
+          finalizeRetroarchExit(abnormal ? `abnormal-exit-code-${code ?? 'null'}` : 'normal-exit')
         })
       }
 

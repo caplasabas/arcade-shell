@@ -1,4 +1,4 @@
-import {formatPeso} from '../utils'
+import { formatPeso } from '../utils'
 
 type Props = {
   withdrawAmount: number
@@ -6,7 +6,7 @@ type Props = {
   balance: number
   requestedAmount: number
   remainingAmount: number
-  maxWithdrawalAmount: number | null
+  maxSelectableAmount: number
   elevated?: boolean
   onAddAmount: () => void
   onMinusAmount: () => void
@@ -20,14 +20,14 @@ export function WithdrawModal({
   balance,
   requestedAmount,
   remainingAmount,
-  maxWithdrawalAmount,
+  maxSelectableAmount,
   elevated = false,
   onAddAmount,
   onMinusAmount,
   onConfirm,
   onCancel,
 }: Props) {
-  const canAfford = balance >= withdrawAmount
+  const canAfford = balance >= withdrawAmount && maxSelectableAmount > 0
   const activeAmount = isWithdrawing ? remainingAmount : withdrawAmount
 
   return (
@@ -43,24 +43,44 @@ export function WithdrawModal({
               {isWithdrawing ? 'Remaining to Dispense' : 'Withdraw Amount'}
             </span>
             <div className="amount-adjust">
-              <button disabled={isWithdrawing} onClick={onMinusAmount} className="modal-toggle">
+              <button
+                disabled={isWithdrawing || maxSelectableAmount === 0}
+                onClick={() => {
+                  if (maxSelectableAmount > 0) onMinusAmount()
+                }}
+                className={`modal-toggle ${maxSelectableAmount === 0 ? 'withdraw-offline' : ''}`}
+              >
                 −
               </button>
-              <span className="withdraw-amount-value">{formatPeso(activeAmount)}</span>
-              <button disabled={isWithdrawing} onClick={onAddAmount} className="modal-toggle">
+              <span
+                className={`withdraw-amount-value ${maxSelectableAmount === 0 ? 'withdraw-offline' : ''}`}
+              >
+                {formatPeso(activeAmount)}
+              </span>
+              <button
+                disabled={isWithdrawing || maxSelectableAmount === 0}
+                onClick={() => maxSelectableAmount > 0 && onAddAmount}
+                className={`modal-toggle ${maxSelectableAmount === 0 ? 'withdraw-offline' : ''}`}
+              >
                 +
               </button>
             </div>
           </div>
 
-          <div className="modal-warning modal-warning-withdraw">Min withdrawable amount is 20</div>
-          {typeof maxWithdrawalAmount === 'number' && (
-            <div className="modal-warning modal-warning-withdraw">
-              Max withdrawable amount is {formatPeso(maxWithdrawalAmount)}
-            </div>
+          {maxSelectableAmount > 0 && (
+            <>
+              <div className="modal-warning modal-warning-withdraw">
+                Min withdrawable amount is 20
+              </div>
+              {typeof maxSelectableAmount === 'number' && (
+                <div className="modal-warning modal-warning-withdraw">
+                  Max withdrawable amount is {formatPeso(maxSelectableAmount)}
+                </div>
+              )}
+            </>
           )}
 
-          {!isWithdrawing && !canAfford && <div className="modal-warning">Insufficient balance</div>}
+          {!isWithdrawing && !canAfford && <div className="modal-warning">Temporarily Offline</div>}
         </div>
         {isWithdrawing && (
           <div className="withdraw-progress-overlay">
