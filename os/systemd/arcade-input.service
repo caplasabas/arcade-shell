@@ -22,6 +22,7 @@ Environment=UINPUT_HELPER_PATH=/opt/arcade/bin/uinput-helper
 Environment=RETROARCH_TTY_MODE=1
 Environment=RETROARCH_TTY_X_SESSION=1
 Environment=RETROARCH_TTY_X_PREWARM=1
+Environment=ARCADE_RETRO_PREWARM_CLIENT_ENABLE=0
 Environment=ARCADE_UI_VT=2
 Environment=ARCADE_GAME_VT=1
 Environment=RETROARCH_PRIMARY_INPUT=P1

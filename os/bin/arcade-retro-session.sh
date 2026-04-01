@@ -12,6 +12,11 @@ OVERLAY_PORT="${ARCADE_RETRO_OVERLAY_PORT:-5174}"
 OVERLAY_PATH="${ARCADE_RETRO_OVERLAY_PATH:-/arcade-life/overlay-state}"
 OVERLAY_READY_RETRIES="${ARCADE_RETRO_OVERLAY_READY_RETRIES:-40}"
 OVERLAY_READY_POLL_MS="${ARCADE_RETRO_OVERLAY_READY_POLL_MS:-250}"
+OVERLAY_STABLE_MS="${ARCADE_RETRO_OVERLAY_STABLE_MS:-1200}"
+CLIENT_READY_MARKER="${ARCADE_RETRO_CLIENT_READY_MARKER:-[INFO] [Environ]: SET_GEOMETRY.}"
+CLIENT_READY_TIMEOUT_MS="${ARCADE_RETRO_CLIENT_READY_TIMEOUT_MS:-10000}"
+CLIENT_READY_POLL_MS="${ARCADE_RETRO_CLIENT_READY_POLL_MS:-100}"
+CLIENT_READY_SETTLE_MS="${ARCADE_RETRO_CLIENT_READY_SETTLE_MS:-900}"
 RETROARCH_BIN="${ARCADE_RETRO_BIN:-/usr/bin/retroarch}"
 RETRO_RUN_USER="${ARCADE_RETRO_RUN_USER:-arcade1}"
 RETRO_RUN_HOME="${ARCADE_RETRO_RUN_HOME:-/home/${RETRO_RUN_USER}}"
@@ -315,6 +320,100 @@ print(f"{value / 1000:.3f}")
 PY
 }
 
+get_client_ready_poll_seconds() {
+  python3 - "$CLIENT_READY_POLL_MS" <<'PY'
+import sys
+value = 100
+try:
+    value = max(25, int(float(sys.argv[1])))
+except Exception:
+    value = 100
+print(f"{value / 1000:.3f}")
+PY
+}
+
+get_client_ready_settle_seconds() {
+  python3 - "$CLIENT_READY_SETTLE_MS" <<'PY'
+import sys
+value = 900
+try:
+    value = max(0, int(float(sys.argv[1])))
+except Exception:
+    value = 900
+print(f"{value / 1000:.3f}")
+PY
+}
+
+get_overlay_stable_seconds() {
+  python3 - "$OVERLAY_STABLE_MS" <<'PY'
+import sys
+value = 1200
+try:
+    value = max(0, int(float(sys.argv[1])))
+except Exception:
+    value = 1200
+print(f"{value / 1000:.3f}")
+PY
+}
+
+wait_for_client_ready() {
+  local attempts
+  attempts="$(python3 - "$CLIENT_READY_TIMEOUT_MS" "$CLIENT_READY_POLL_MS" <<'PY'
+import sys
+timeout_ms = 10000
+poll_ms = 100
+try:
+    timeout_ms = max(0, int(float(sys.argv[1])))
+except Exception:
+    pass
+try:
+    poll_ms = max(25, int(float(sys.argv[2])))
+except Exception:
+    pass
+print(max(1, timeout_ms // poll_ms))
+PY
+)"
+  local poll_seconds
+  local attempt
+  poll_seconds="$(get_client_ready_poll_seconds)"
+
+  for attempt in $(seq 1 "$attempts"); do
+    if [[ -f "$RETROARCH_CLIENT_LOG" ]] && grep -Fq "$CLIENT_READY_MARKER" "$RETROARCH_CLIENT_LOG"; then
+      log "client ready marker observed: $CLIENT_READY_MARKER"
+      return 0
+    fi
+
+    if [[ -n "$retroarch_pid" ]] && ! kill -0 "$retroarch_pid" >/dev/null 2>&1; then
+      log "client ready wait aborted: RetroArch exited before marker"
+      return 1
+    fi
+
+    sleep "$poll_seconds"
+  done
+
+  log "client ready marker not observed within ${CLIENT_READY_TIMEOUT_MS}ms; continuing"
+  return 0
+}
+
+wait_for_overlay_stable() {
+  local stable_seconds
+  stable_seconds="$(get_overlay_stable_seconds)"
+
+  if [[ -z "$overlay_pid" ]]; then
+    log "overlay stability check skipped: overlay pid missing"
+    return 1
+  fi
+
+  sleep "$stable_seconds"
+  if kill -0 "$overlay_pid" >/dev/null 2>&1; then
+    log "overlay stable for ${OVERLAY_STABLE_MS}ms pid=$overlay_pid"
+    return 0
+  fi
+
+  log "overlay exited before stable window elapsed"
+  return 1
+}
+
 wait_for_overlay_state() {
   if ! command -v curl >/dev/null 2>&1; then
     log "overlay readiness skipped: curl missing"
@@ -346,13 +445,18 @@ wait_for_overlay_state() {
 
 launch_overlay_after_delay() {
   local delay_seconds
+  local settle_seconds
   delay_seconds="$(get_overlay_delay_seconds)"
+  settle_seconds="$(get_client_ready_settle_seconds)"
 
   sleep "$delay_seconds"
 
   while [[ -n "$retroarch_pid" ]] && kill -0 "$retroarch_pid" >/dev/null 2>&1; do
     wait_for_overlay_state || return 0
     launch_overlay
+    wait_for_overlay_stable || return 0
+    wait_for_client_ready || return 0
+    sleep "$settle_seconds"
     mark_session_ready
     return
   done
@@ -371,6 +475,8 @@ retroarch_args+=(--log-file "$RETROARCH_CLIENT_LOG")
 retroarch_args+=(-L "$RETROARCH_CORE_PATH" "$RETROARCH_ROM_PATH")
 log "launching retroarch as $RETRO_RUN_USER"
 
+rm -f "$RETROARCH_CLIENT_LOG" /tmp/arcade-retro-overlay.log
+
 run_as_arcade_user "$RETROARCH_BIN" "${retroarch_args[@]}" &
 retroarch_pid="$!"
 log "retroarch pid=$retroarch_pid"
@@ -378,6 +484,7 @@ log "retroarch pid=$retroarch_pid"
 if [[ "$OVERLAY_ENABLE" != "0" ]]; then
   launch_overlay_after_delay &
 else
+  wait_for_client_ready || true
   mark_session_ready
 fi
 

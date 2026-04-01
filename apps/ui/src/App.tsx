@@ -47,7 +47,7 @@ const GRID_ROWS = 3
 const GRID_VISIBLE_COLS = 4
 const EXIT_CONFIRM_WINDOW_MS = 2800
 const BOOT_UPDATER_NETWORK_GRACE_MS = 2500
-const BOOT_UPDATER_STABLE_NETWORK_MS = 5000
+const BOOT_UPDATER_STABLE_NETWORK_MS = 20000
 const AUTO_BOOT_UPDATE_CHECK = true
 
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
@@ -1931,6 +1931,13 @@ export default function App() {
       }
 
       if (payload.type === 'GAME_LAUNCHING') {
+        if (shellUpdateStableTimerRef.current !== null) {
+          window.clearTimeout(shellUpdateStableTimerRef.current)
+          shellUpdateStableTimerRef.current = null
+        }
+        setShellUpdateOverlayVisible(false)
+        setShellUpdateOverlayStatus({ label: 'Checking for updates', detail: null })
+        setBootFlowComplete(true)
         setTransitionOverlay({
           visible: true,
           label: 'Loading Game...',

@@ -23,6 +23,7 @@ XSET_TIMEOUT_SEC="${ARCADE_RETRO_XSET_TIMEOUT_SEC:-1}"
 PREWARM_RESTART_WAIT_MS="${ARCADE_RETRO_PREWARM_RESTART_WAIT_MS:-1500}"
 PREWARM_FIRST_LAUNCH_REFRESH="${ARCADE_RETRO_PREWARM_FIRST_LAUNCH_REFRESH:-1}"
 PREWARM_FIRST_LAUNCH_STAMP="${ARCADE_RETRO_PREWARM_FIRST_LAUNCH_STAMP:-/tmp/arcade-retro-prewarm-first-launch.ok}"
+PREWARM_FIRST_LAUNCH_STABILIZE_MS="${ARCADE_RETRO_PREWARM_FIRST_LAUNCH_STABILIZE_MS:-2200}"
 PREWARM_CLIENT_ENABLE="${ARCADE_RETRO_PREWARM_CLIENT_ENABLE:-1}"
 PREWARM_CLIENT_DURATION_MS="${ARCADE_RETRO_PREWARM_CLIENT_DURATION_MS:-2500}"
 PREWARM_CLIENT_CLEAR_SETTLE_MS="${ARCADE_RETRO_PREWARM_CLIENT_CLEAR_SETTLE_MS:-600}"
@@ -71,6 +72,7 @@ PY
 
 poll_seconds="$(ms_to_seconds "$XORG_READY_POLL_MS")"
 prewarm_restart_wait_seconds="$(ms_to_seconds "$PREWARM_RESTART_WAIT_MS")"
+prewarm_first_launch_stabilize_seconds="$(ms_to_seconds "$PREWARM_FIRST_LAUNCH_STABILIZE_MS")"
 prewarm_client_duration_seconds="$(ms_to_seconds "$PREWARM_CLIENT_DURATION_MS")"
 prewarm_client_clear_settle_seconds="$(ms_to_seconds "$PREWARM_CLIENT_CLEAR_SETTLE_MS")"
 
@@ -163,6 +165,8 @@ maybe_refresh_first_launch_prewarmed_x() {
   sleep "$prewarm_restart_wait_seconds"
 
   if wait_for_x_ready "$PREWARM_XORG_READY_RETRIES"; then
+    env DISPLAY="$DISPLAY_VALUE" XAUTHORITY="" xsetroot -solid black >/dev/null 2>&1 || true
+    sleep "$prewarm_first_launch_stabilize_seconds"
     log "first-launch prewarmed X refresh complete"
     return 0
   fi
