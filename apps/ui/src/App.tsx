@@ -771,11 +771,7 @@ export default function App() {
   }, [])
 
   const isNoInternetModalActive =
-    piOfflineLockActive &&
-    !showWifiModal &&
-    !showSettingsModal &&
-    !runningCasino &&
-    runningGame?.type !== 'arcade'
+    piOfflineLockActive && !showWifiModal && !showSettingsModal && runningGame?.type !== 'arcade'
 
   const openNetworkSettings = useCallback(() => {
     setShowSettingsModal(false)

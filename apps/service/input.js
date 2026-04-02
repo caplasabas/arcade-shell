@@ -1,3 +1,34 @@
+// ============================
+// INTERNET REACHABILITY POLLING
+// ============================
+
+let internetState = 'unknown'
+
+async function checkInternetReachability() {
+  try {
+    const res = await requestJsonWithCurl('https://clients3.google.com/generate_204', {
+      method: 'GET',
+      timeoutMs: 2000,
+    })
+
+    if (res.ok) {
+      if (internetState !== 'ok') {
+        internetState = 'ok'
+        dispatch({ type: 'INTERNET_OK' })
+      }
+    } else {
+      throw new Error('not ok')
+    }
+  } catch {
+    if (internetState !== 'offline') {
+      internetState = 'offline'
+      dispatch({ type: 'INTERNET_LOST' })
+    }
+  }
+}
+
+// start polling loop
+setInterval(checkInternetReachability, 5000)
 /**
  * Arcade Input Service (Raspberry Pi)
  * ----------------------------------
@@ -124,7 +155,7 @@ let serverInstance = null
 
 let virtualP1 = null
 let virtualP2 = null
-const VIRTUAL_DEVICE_STAGGER_MS = 1350
+const VIRTUAL_DEVICE_STAGGER_MS = 650
 
 let retroarchActive = false
 let retroarchProcess = null
@@ -293,7 +324,7 @@ function parseNonNegativeMs(value, fallback) {
 const RETROARCH_EXIT_GUARD_MS = parseNonNegativeMs(process.env.RETROARCH_EXIT_GUARD_MS, 1500)
 const RETROARCH_START_INPUT_GUARD_MS = parseNonNegativeMs(
   process.env.RETROARCH_START_INPUT_GUARD_MS,
-  6500,
+  3500,
 )
 const RETROARCH_EXIT_CONFIRM_WINDOW_MS = parseNonNegativeMs(
   process.env.RETROARCH_EXIT_CONFIRM_WINDOW_MS,
@@ -495,9 +526,38 @@ function ensureRetroXWarm(reason = 'boot') {
     setTimeout(() => {
       switchToVTWithRetry(getTargetUiVT(), 'boot-ui')
       setTimeout(() => switchToVTWithRetry(getTargetUiVT(), 'boot-ui-post'), 250)
-    }, 8000)
+    }, 3000)
   }
 }
+
+/**
+ * OFFLINE QUEUE FLUSH LOOP
+ */
+setInterval(async () => {
+  if (internetState !== 'ok') return
+  if (flushingOfflineQueue) return
+  if (offlineQueue.length === 0) return
+
+  flushingOfflineQueue = true
+
+  while (offlineQueue.length > 0) {
+    const item = offlineQueue[0]
+
+    try {
+      const res = await item.fn(item.payload)
+
+      if (!res || res.ok === false) {
+        throw new Error('flush failed')
+      }
+
+      offlineQueue.shift()
+    } catch {
+      break
+    }
+  }
+
+  flushingOfflineQueue = false
+}, 2000)
 
 function startSplashForRetroarch() {
   if (!USE_SPLASH_TRANSITIONS) return
@@ -578,6 +638,45 @@ function hideChromiumUiForRetroarch() {
     console.log('[UI] Chromium hide requested before RetroArch launch')
   } else {
     console.log('[UI] Chromium hide skipped (xdotool/wmctrl not installed)')
+  }
+}
+
+/**
+ * OFFLINE QUEUE (in-memory, minimal)
+ */
+const offlineQueue = []
+let flushingOfflineQueue = false
+
+const MAX_OFFLINE_QUEUE = 200
+
+function enqueueOffline(item) {
+  if (offlineQueue.length >= MAX_OFFLINE_QUEUE) {
+    offlineQueue.shift() // drop oldest
+  }
+  offlineQueue.push(item)
+}
+
+function hasInternet() {
+  return internetState === 'ok'
+}
+
+async function safeRpcCall(fn, payload) {
+  if (!hasInternet()) {
+    enqueueOffline({ fn, payload })
+    return { queued: true }
+  }
+
+  try {
+    const res = await fn(payload)
+
+    if (!res || res.ok === false) {
+      throw new Error(`RPC failed (${res?.status})`)
+    }
+
+    return res
+  } catch (err) {
+    enqueueOffline({ fn, payload })
+    return { queued: true }
   }
 }
 
@@ -820,28 +919,23 @@ async function recordWithdrawalDispense(amount) {
   }
 
   try {
-    const metricResponse = await requestJsonWithCurl(
-      `${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`,
+    await safeRpcCall(
+      body =>
+        requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`, {
+          method: 'POST',
+          headers: getSupabaseHeaders(),
+          timeoutMs: 3500,
+          body,
+        }),
       {
-        method: 'POST',
-        headers: getSupabaseHeaders(),
-        timeoutMs: 3500,
-        body: {
-          p_device_id: DEVICE_ID,
-          p_event_type: 'withdrawal',
-          p_amount: dispenseAmount,
-          p_event_ts: eventTs,
-          p_metadata: metadata,
-          p_write_ledger: true,
-        },
+        p_device_id: DEVICE_ID,
+        p_event_type: 'withdrawal',
+        p_amount: dispenseAmount,
+        p_event_ts: eventTs,
+        p_metadata: metadata,
+        p_write_ledger: true,
       },
     )
-
-    if (!metricResponse.ok) {
-      throw new Error(
-        `metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim(),
-      )
-    }
   } catch (error) {
     console.error('[WITHDRAW] dispense accounting failed', {
       amount: dispenseAmount,
@@ -861,28 +955,23 @@ async function recordHopperTopup(amount) {
   }
 
   try {
-    const metricResponse = await requestJsonWithCurl(
-      `${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`,
+    await safeRpcCall(
+      body =>
+        requestJsonWithCurl(`${SUPABASE_URL}/rest/v1/rpc/apply_metric_event`, {
+          method: 'POST',
+          headers: getSupabaseHeaders(),
+          timeoutMs: 3500,
+          body,
+        }),
       {
-        method: 'POST',
-        headers: getSupabaseHeaders(),
-        timeoutMs: 3500,
-        body: {
-          p_device_id: DEVICE_ID,
-          p_event_type: 'hopper_in',
-          p_amount: topupAmount,
-          p_event_ts: eventTs,
-          p_metadata: metadata,
-          p_write_ledger: true,
-        },
+        p_device_id: DEVICE_ID,
+        p_event_type: 'hopper_in',
+        p_amount: topupAmount,
+        p_event_ts: eventTs,
+        p_metadata: metadata,
+        p_write_ledger: true,
       },
     )
-
-    if (!metricResponse.ok) {
-      throw new Error(
-        `metric rpc failed (${metricResponse.status}) ${metricResponse.text || ''}`.trim(),
-      )
-    }
   } catch (error) {
     console.error('[HOPPER] topup accounting failed', {
       amount: topupAmount,
@@ -1150,7 +1239,9 @@ function composeArcadeOsdOverlay(message, balanceOverride = null, options = null
   if (ARCADE_RETRO_OSD_STYLE === 'hud') {
     const hudParts = []
     if (ARCADE_RETRO_OSD_LABEL) hudParts.push(ARCADE_RETRO_OSD_LABEL)
-    hudParts.push(balanceBanner)
+    const isOffline = typeof hasLocalNetworkLink === 'function' && !hasLocalNetworkLink()
+
+    hudParts.push(isOffline ? 'OFFLINE' : balanceBanner)
     hudParts.push(arcadeOverlayNotice || base)
     if (ARCADE_RETRO_OSD_SHOW_SESSION_STATS) {
       hudParts.push(`P1:${p1Lives}`, `P2:${p2Lives}`, `Balance:P${balanceText}`)
@@ -1183,7 +1274,15 @@ function getArcadeRetroFooterState(balanceOverride = null) {
   const p2Disabled = joinMode === 'single_only'
 
   const leftBase = p1HasCredit ? 'CREDITS 1' : p1ConfirmArmed ? 'START GAME?' : 'PRESS [START]'
-  const centerBase = exitConfirmArmed ? 'EXIT GAME?' : `Balance ₱${balanceText}`
+
+  const isOffline = typeof hasLocalNetworkLink === 'function' && !hasLocalNetworkLink()
+
+  const centerBase = exitConfirmArmed
+    ? 'EXIT GAME?'
+    : isOffline
+      ? 'OFFLINE'
+      : `Balance ₱${balanceText}`
+
   const rightBase = p2HasCredit
     ? 'CREDITS 1'
     : p2ConfirmArmed

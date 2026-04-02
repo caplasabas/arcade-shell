@@ -1,6 +1,6 @@
 {
   "name": "arcade-shell",
-  "version": "0.9.50",
+  "version": "0.9.996",
   "private": true,
   "workspaces": [
     "apps/*"
