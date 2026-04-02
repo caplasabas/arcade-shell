@@ -771,7 +771,11 @@ export default function App() {
   }, [])
 
   const isNoInternetModalActive =
-    piOfflineLockActive && !showWifiModal && !showSettingsModal && runningGame?.type !== 'arcade'
+    piOfflineLockActive &&
+    !showWifiModal &&
+    !showSettingsModal &&
+    !runningCasino &&
+    runningGame?.type !== 'arcade'
 
   const openNetworkSettings = useCallback(() => {
     setShowSettingsModal(false)
@@ -1879,6 +1883,8 @@ export default function App() {
           clearTimeout(internetLossTimerRef.current)
           internetLossTimerRef.current = null
         }
+
+        setNetworkStage('no-internet')
         return
       }
 
@@ -1887,6 +1893,9 @@ export default function App() {
           clearTimeout(internetLossTimerRef.current)
           internetLossTimerRef.current = null
         }
+
+        setShowWifiModal(false)
+        setShowSettingsModal(false)
 
         setNetworkStage('ok')
         return
@@ -1908,7 +1917,11 @@ export default function App() {
         return
       }
 
-      if (s.noInternetModalActive && isOfflineModalConfirmInput(payload)) {
+      if (
+        s.noInternetModalActive &&
+        networkStageRef.current !== 'ok' &&
+        isOfflineModalConfirmInput(payload)
+      ) {
         openOfflineNetworkFlowRef.current()
         return
       }
