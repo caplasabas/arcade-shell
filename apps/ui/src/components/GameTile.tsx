@@ -71,7 +71,7 @@ export function GameTile({
       >
         {priceLabel}
       </div>
-      {adminDisabled ? <div className="tile-status-badge">Disabled</div> : null}
+      {adminDisabled ? <div className="tile-status-badge">Coming Soon</div> : null}
     </div>
   )
 }
