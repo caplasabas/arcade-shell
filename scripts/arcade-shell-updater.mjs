@@ -728,7 +728,22 @@ async function maybeInstallShellUpdate({
   await installEtcPayload(installDir)
   await installManagedBootAndSessionFiles(installDir)
   await installSystemdUnits(extractDir, systemdTarget)
+  try {
+    run('systemctl', ['restart', 'NetworkManager'])
 
+    run('sh', [
+      '-lc',
+      `
+    nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="wifi"{print $1}' | while read name; do
+      nmcli connection modify "$name" wifi.powersave 2 || true
+    done
+
+    iw dev wlan0 set power_save off 2>/dev/null || true
+  `,
+    ])
+  } catch (e) {
+    console.warn('[arcade-shell-updater] failed to configure wifi powersave:', e.message)
+  }
   const envFilePath = path.join(installDir, 'os', '.env.arcade-service')
   if (await fileExists(envFilePath)) {
     console.log(
