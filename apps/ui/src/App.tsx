@@ -159,6 +159,9 @@ export default function App() {
   const [wifiName, setWifiName] = useState<string | null>(null)
   const [shellVersion, setShellVersion] = useState<string>('')
 
+  const isWifi = Boolean(wifiConnected)
+  const isEthernet = !isWifi && Boolean(ethernetIp)
+
   const [showWifiModal, setShowWifiModal] = useState(false)
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   const [settingsFocused, setSettingsFocused] = useState(false)
@@ -1106,7 +1109,14 @@ export default function App() {
       unsubGames()
       unsubCabinet()
     }
-  }, [deviceId, findFirstSelectableGameIndex, initialized, isSelectableGame, networkStage, runningGame])
+  }, [
+    deviceId,
+    findFirstSelectableGameIndex,
+    initialized,
+    isSelectableGame,
+    networkStage,
+    runningGame,
+  ])
 
   useEffect(() => {
     if (!deviceId) return
@@ -2979,6 +2989,19 @@ export default function App() {
     )
   }
 
+  function EthernetIndicator() {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <svg width="28" height="20" viewBox="0 0 24 24">
+          <path
+            fill="#ffd84d"
+            d="M6 2h12a2 2 0 0 1 2 2v6h-2V4H6v6H4V4a2 2 0 0 1 2-2zm-2 10h16v6a2 2 0 0 1-2 2h-4v2h-4v-2H6a2 2 0 0 1-2-2v-6zm4 2v2h2v-2H8zm6 0v2h2v-2h-2z"
+          />
+        </svg>
+      </div>
+    )
+  }
+
   if (networkStage === 'boot' || (networkStage === 'ok' && !bootFlowComplete)) {
     return (
       <LoadingOverlay
@@ -3103,9 +3126,15 @@ export default function App() {
         <div className="top-status-bar">
           <div className="top-status-left">
             <div className="top-status-network">
-              <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
+              {isWifi ? (
+                <WifiIndicator signal={wifiSignal} connected={wifiConnected} />
+              ) : isEthernet ? (
+                <EthernetIndicator />
+              ) : (
+                <WifiIndicator signal={null} connected={false} />
+              )}
               <span className="top-status-ssid">
-                {wifiSsid?.trim() || (wifiConnected ? 'Connected' : ethernetName || 'Offline')}
+                {isWifi ? wifiSsid?.trim() || 'WIFI' : isEthernet ? 'ETHERNET' : 'OFFLINE'}
               </span>
             </div>
             <div>{formatDateTime(now)}</div>

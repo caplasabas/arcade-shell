@@ -51,7 +51,7 @@ const GPIOCHIP = 'gpiochip0'
 const HOPPER_PAY_PIN = 17
 
 const HOPPER_TIMEOUT_MS = 60000
-const HOPPER_NO_PULSE_TIMEOUT_MS = 3000
+const HOPPER_NO_PULSE_TIMEOUT_MS = 5000
 const INTERNET_PROBE_TIMEOUT_SEC = 2
 const INTERNET_MONITOR_INTERVAL_MS = 2000
 const INTERNET_FAIL_THRESHOLD = 2
@@ -124,7 +124,7 @@ let serverInstance = null
 
 let virtualP1 = null
 let virtualP2 = null
-const VIRTUAL_DEVICE_STAGGER_MS = 350
+const VIRTUAL_DEVICE_STAGGER_MS = 1350
 
 let retroarchActive = false
 let retroarchProcess = null
@@ -1574,6 +1574,25 @@ async function syncArcadeSessionBalance(options = {}) {
     }
 
     const previous = arcadeSession.lastKnownBalance
+    if (previous !== null && previous > 0 && latestBalance === 0) {
+      console.log('[ARCADE LIFE BALANCE] rejected zero regression', {
+        previous,
+        next: latestBalance,
+      })
+      return
+    }
+    if (
+      previous !== null &&
+      latestBalance < previous &&
+      Date.now() - (arcadeSession.lastBalanceMutationAt || 0) < 3000
+    ) {
+      console.log('[ARCADE LIFE BALANCE] rejected regression', {
+        previous,
+        next: latestBalance,
+      })
+      return
+    }
+
     arcadeSession.lastKnownBalance = latestBalance
 
     if (Number.isFinite(arcadeBalancePushFloor) && latestBalance >= arcadeBalancePushFloor) {
@@ -1920,6 +1939,7 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
 
       if (resolvedBalance !== null) {
         sessionRef.lastKnownBalance = resolvedBalance
+        sessionRef.lastBalanceMutationAt = Date.now()
       }
 
       if (result.ok) {
@@ -2000,6 +2020,9 @@ function requestArcadeLifePurchase(player, target, keyCode, reason = 'start') {
 // ============================
 
 function handleDepositPulse() {
+  if (arcadeSession?.active) {
+    arcadeSession.lastBalanceMutationAt = Date.now()
+  }
   const now = Date.now()
 
   if (depositPulseCount === 0) {
@@ -2038,6 +2061,9 @@ function finalizeDepositCoin() {
 
 function flushDepositBatch() {
   if (depositBatchCredits <= 0) return
+  if (arcadeSession?.active) {
+    arcadeSession.lastBalanceMutationAt = Date.now()
+  }
 
   const finalCredits = depositBatchCredits * 5
 
@@ -2123,12 +2149,18 @@ function startHopper(amount) {
     stopHopper()
   }, HOPPER_NO_PULSE_TIMEOUT_MS)
 
+  const estimated = (amount / 20) * 1200
+  const buffer = 3000 // +3 seconds safety
+  const minRuntime = 5000 // minimum 5 seconds
+
+  const runtime = Math.max(estimated + buffer, minRuntime)
+
   hopperTimeout = setTimeout(
     () => {
       console.error('[HOPPER] TIMEOUT — FORCED STOP')
       stopHopper()
     },
-    Math.min((amount / 20) * 1200, HOPPER_TIMEOUT_MS, HARD_MAX_MS),
+    Math.min(runtime, HOPPER_TIMEOUT_MS, HARD_MAX_MS),
   )
 }
 
@@ -2902,7 +2934,12 @@ function routePlayerInput(source, index, value) {
       }
     }
 
-    if (value === 1 && playerAction === 'MENU' && !isStartButton(index) && CASINO_MENU_EXITS_RETROARCH) {
+    if (
+      value === 1 &&
+      playerAction === 'MENU' &&
+      !isStartButton(index) &&
+      CASINO_MENU_EXITS_RETROARCH
+    ) {
       handleRetroarchMenuExitIntent()
       return
     }
@@ -3891,7 +3928,7 @@ function getNetworkInfo() {
   return {
     ethernet: getExternalIpv4('eth0')?.address || null,
     wifi: getExternalIpv4('wlan0')?.address || null,
-    ethernet_name: getExternalIpv4('eth0') ? 'eth0' : null,
+    ethernet_name: getExternalIpv4('eth0') ? 'ETHERNET' : null,
     wifi_name: getExternalIpv4('wlan0') ? 'wlan0' : null,
   }
 }
