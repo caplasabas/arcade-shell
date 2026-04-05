@@ -2,33 +2,6 @@
 // INTERNET REACHABILITY POLLING
 // ============================
 
-let internetState = 'unknown'
-
-async function checkInternetReachability() {
-  try {
-    const res = await requestJsonWithCurl('https://clients3.google.com/generate_204', {
-      method: 'GET',
-      timeoutMs: 2000,
-    })
-
-    if (res.ok) {
-      if (internetState !== 'ok') {
-        internetState = 'ok'
-        dispatch({ type: 'INTERNET_OK' })
-      }
-    } else {
-      throw new Error('not ok')
-    }
-  } catch {
-    if (internetState !== 'offline') {
-      internetState = 'offline'
-      dispatch({ type: 'INTERNET_LOST' })
-    }
-  }
-}
-
-// start polling loop
-setInterval(checkInternetReachability, 5000)
 /**
  * Arcade Input Service (Raspberry Pi)
  * ----------------------------------
@@ -80,6 +53,7 @@ const DEV_INPUT_BYPASS_ENABLED = !IS_PI && IS_MACOS
 
 const GPIOCHIP = 'gpiochip0'
 const HOPPER_PAY_PIN = 17
+const COIN_INHIBIT_PIN = 22
 
 const HOPPER_TIMEOUT_MS = 60000
 const HOPPER_NO_PULSE_TIMEOUT_MS = 5000
@@ -2193,6 +2167,8 @@ const HARD_MAX_MS = 90_000
 function startHopper(amount) {
   if (shuttingDown || hopperActive || amount <= 0) return
 
+  setCoinInhibit(true)
+
   activeWithdrawalContext = {
     requestId: `withdraw-${Date.now()}`,
     requestedAmount: toMoney(amount, 0),
@@ -2300,6 +2276,8 @@ function stopHopper() {
   gpioOff(HOPPER_PAY_PIN)
   hopperActive = false
 
+  setCoinInhibit(false)
+
   if (hopperTimeout) {
     clearTimeout(hopperTimeout)
     hopperTimeout = null
@@ -2324,6 +2302,7 @@ function stopHopper() {
 // ============================
 
 let hopperCtl = null
+let coinCtl = null
 
 function gpioOn(pin) {
   if (!IS_PI) return
@@ -2346,6 +2325,61 @@ function gpioOff(pin) {
 
   hopperCtl = spawn('gpioset', [GPIOCHIP, `${pin}=1`])
 }
+
+let lastCoinState = null
+
+function setCoinInhibit(disabled) {
+  if (!IS_PI) return
+
+  if (lastCoinState === disabled) return
+
+  if (coinCtl) {
+    coinCtl.kill('SIGTERM')
+    coinCtl = null
+  }
+
+  // CONFIRMED:
+  // 0 = reject (relay ON)
+  // 1 = accept (relay OFF)
+  const value = disabled ? 0 : 1
+
+  coinCtl = spawn('gpioset', [GPIOCHIP, `${COIN_INHIBIT_PIN}=${value}`])
+
+  lastCoinState = disabled
+
+  console.log(`[COIN] ${disabled ? 'REJECT' : 'ACCEPT'}`)
+}
+
+let internetState = 'unknown'
+
+async function checkInternetReachability() {
+  try {
+    const res = await requestJsonWithCurl('https://clients3.google.com/generate_204', {
+      method: 'GET',
+      timeoutMs: 2000,
+    })
+
+    if (res.ok) {
+      if (internetState !== 'ok') {
+        internetState = 'ok'
+        dispatch({ type: 'INTERNET_OK' })
+        setCoinInhibit(false)
+      }
+    } else {
+      throw new Error('not ok')
+    }
+  } catch {
+    if (internetState !== 'offline') {
+      internetState = 'offline'
+      dispatch({ type: 'INTERNET_LOST' })
+      setCoinInhibit(true)
+    }
+  }
+}
+
+setCoinInhibit(false)
+// start polling loop
+setInterval(checkInternetReachability, 5000)
 
 // ============================
 // USB ENCODER
@@ -3389,6 +3423,13 @@ async function shutdown() {
     if (hopperCtl) {
       hopperCtl.kill('SIGTERM')
       hopperCtl = null
+    }
+
+    gpioOff(COIN_INHIBIT_PIN)
+
+    if (coinCtl) {
+      coinCtl.kill('SIGTERM')
+      coinCtl = null
     }
 
     player1?.removeAllListeners?.()
