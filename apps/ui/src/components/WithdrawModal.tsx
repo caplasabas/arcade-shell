@@ -17,7 +17,6 @@ type Props = {
 export function WithdrawModal({
   withdrawAmount,
   isWithdrawing,
-  balance,
   requestedAmount,
   remainingAmount,
   maxSelectableAmount,
@@ -27,7 +26,7 @@ export function WithdrawModal({
   onConfirm,
   onCancel,
 }: Props) {
-  const canAfford = balance >= withdrawAmount && maxSelectableAmount > 0
+  const canAfford = maxSelectableAmount > 0 && withdrawAmount <= maxSelectableAmount
   const activeAmount = isWithdrawing ? remainingAmount : withdrawAmount
 
   return (
@@ -44,10 +43,8 @@ export function WithdrawModal({
             </span>
             <div className="amount-adjust">
               <button
-                disabled={isWithdrawing || maxSelectableAmount === 0}
-                onClick={() => {
-                  if (maxSelectableAmount > 0) onMinusAmount()
-                }}
+                disabled={isWithdrawing || withdrawAmount <= 20}
+                onClick={onMinusAmount}
                 className={`modal-toggle ${maxSelectableAmount === 0 ? 'withdraw-offline' : ''}`}
               >
                 −
@@ -58,8 +55,8 @@ export function WithdrawModal({
                 {formatPeso(activeAmount)}
               </span>
               <button
-                disabled={isWithdrawing || maxSelectableAmount === 0}
-                onClick={() => maxSelectableAmount > 0 && onAddAmount}
+                disabled={isWithdrawing || withdrawAmount >= maxSelectableAmount}
+                onClick={onAddAmount}
                 className={`modal-toggle ${maxSelectableAmount === 0 ? 'withdraw-offline' : ''}`}
               >
                 +
@@ -80,7 +77,9 @@ export function WithdrawModal({
             </>
           )}
 
-          {!isWithdrawing && !canAfford && <div className="modal-warning">Temporarily Offline</div>}
+          {!isWithdrawing && maxSelectableAmount === 0 && (
+            <div className="modal-warning">Unavailable</div>
+          )}
         </div>
         {isWithdrawing && (
           <div className="withdraw-progress-overlay">

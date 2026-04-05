@@ -274,6 +274,13 @@ export default function App() {
             typeof data.maxWithdrawalAmount === 'number' ? Number(data.maxWithdrawalAmount) : null,
           enabled: Boolean(data.enabled),
         })
+
+        const nextMax =
+          typeof data.maxWithdrawalAmount === 'number' ? Number(data.maxWithdrawalAmount) : 0
+
+        if (nextMax > 0) {
+          setWithdrawAmount(prev => clampWithdrawAmount(prev, nextMax, 20))
+        }
       } catch {
         // ignore transient withdraw-limit failures
       }
@@ -537,6 +544,15 @@ export default function App() {
   }, [runningCasino])
 
   const [withdrawAmount, setWithdrawAmount] = useState(20)
+
+  function clampWithdrawAmount(value: number, max: number, step: number) {
+    const min = 20
+    const safeMax = Number.isFinite(max) && max > 0 ? max : min
+    const clamped = Math.min(Math.max(min, value), safeMax)
+    const stepped = Math.floor(clamped / step) * step
+    return Math.max(min, Math.min(stepped, safeMax))
+  }
+
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawRequestedAmount, setWithdrawRequestedAmount] = useState(0)
@@ -1413,13 +1429,13 @@ export default function App() {
     if (!runningCasinoRef.current || !next.canOpen || next.isWithdrawing) return
 
     const max = getMaxSelectable(next.balance)
-    if (max < MIN) return
 
     setWithdrawAmount(prev => {
       const normalized = Math.floor(prev / STEP) * STEP
       const withMin = Math.max(MIN, normalized)
       return Math.min(withMin, max)
     })
+
     setShowWithdrawModal(true)
   }, [flashUiNotice])
 
