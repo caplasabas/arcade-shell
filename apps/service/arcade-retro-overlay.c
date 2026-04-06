@@ -135,7 +135,23 @@ static void normalize_overlay_text(char *text) {
   }
 
   normalized[out] = '\0';
-  strncpy(text, normalized, MAX_TEXT - 1);
+
+  // Convert " | " separator into newline for 2-row center display
+  char with_break[MAX_TEXT];
+  size_t wb_out = 0;
+  for (size_t i = 0; normalized[i] != '\0' && wb_out + 1 < sizeof(with_break);) {
+    if (normalized[i] == ' ' &&
+        normalized[i + 1] == '|' &&
+        normalized[i + 2] == ' ') {
+      with_break[wb_out++] = '\n';
+      i += 3;
+      continue;
+    }
+    with_break[wb_out++] = normalized[i++];
+  }
+  with_break[wb_out] = '\0';
+
+  strncpy(text, with_break, MAX_TEXT - 1);
   text[MAX_TEXT - 1] = '\0';
 }
 
@@ -300,6 +316,62 @@ static bool text_rect_for_zone(
   return true;
 }
 
+static bool text_rect_for_zone_multiline(
+  XFontStruct *font,
+  int zone_x,
+  int zone_w,
+  int height,
+  const char *text,
+  XRectangle *rect_out
+) {
+  if (!text || text[0] == '\0') return false;
+
+  const char *newline = strchr(text, '\n');
+
+  // fallback to single line
+  if (!newline) {
+    return text_rect_for_zone(font, zone_x, zone_w, height, text, true, rect_out, NULL, NULL);
+  }
+
+  char top[MAX_TEXT];
+  char bottom[MAX_TEXT];
+
+  size_t top_len = (size_t)(newline - text);
+  strncpy(top, text, top_len);
+  top[top_len] = '\0';
+
+  strncpy(bottom, newline + 1, MAX_TEXT - 1);
+  bottom[MAX_TEXT - 1] = '\0';
+
+  int dir, asc, desc;
+  XCharStruct overall_top, overall_bottom;
+
+  XTextExtents(font, top, strlen(top), &dir, &asc, &desc, &overall_top);
+  XTextExtents(font, bottom, strlen(bottom), &dir, &asc, &desc, &overall_bottom);
+
+  int max_w = overall_top.width > overall_bottom.width
+    ? overall_top.width
+    : overall_bottom.width;
+
+  int text_h = asc + desc;
+  int line_gap = 6; // increased spacing between lines
+  int total_h = text_h * 2 + line_gap;
+
+  int pad_x = 4;
+  int pad_y = 2;
+
+  // MUST match draw_zone() vertical math
+  int base_y = (height - total_h) / 2 + asc;
+  int rect_y = base_y - asc - pad_y;
+
+  rect_out->x = zone_x + (zone_w - max_w) / 2 - pad_x;
+  rect_out->y = rect_y;
+  rect_out->width = max_w + pad_x * 2;
+  rect_out->height = total_h + pad_y * 2;
+
+  return true;
+}
+
 static void draw_zone(
   Display *display,
   Window window,
@@ -313,13 +385,72 @@ static void draw_zone(
   const char *text,
   bool center_emphasis
 ) {
-  XRectangle rect;
-  int text_x = 0;
-  int text_y = 0;
-  if (!text_rect_for_zone(font, zone_x, zone_w, height, text, center_emphasis, &rect, &text_x, &text_y)) return;
-  XFillRectangle(display, window, fill_gc, rect.x, rect.y, rect.width, rect.height);
-  XDrawString(display, window, shadow_gc, text_x + 1, text_y + 1, text, (int)strlen(text));
-  XDrawString(display, window, text_gc, text_x, text_y, text, (int)strlen(text));
+  if (!text || text[0] == '\0') return;
+
+  // Detect multiline (split by '\n')
+  const char *newline = strchr(text, '\n');
+
+  if (!center_emphasis || !newline) {
+    // Default single-line behavior (unchanged)
+    XRectangle rect;
+    int text_x = 0;
+    int text_y = 0;
+
+    if (!text_rect_for_zone(font, zone_x, zone_w, height, text, center_emphasis, &rect, &text_x, &text_y)) return;
+
+    XFillRectangle(display, window, fill_gc, rect.x, rect.y, rect.width, rect.height);
+    XDrawString(display, window, shadow_gc, text_x + 1, text_y + 1, text, (int)strlen(text));
+    XDrawString(display, window, text_gc, text_x, text_y, text, (int)strlen(text));
+    return;
+  }
+
+  // --- MULTI-LINE CENTER RENDER (2 rows) ---
+  char top[MAX_TEXT];
+  char bottom[MAX_TEXT];
+
+  size_t top_len = (size_t)(newline - text);
+  strncpy(top, text, top_len);
+  top[top_len] = '\0';
+
+  strncpy(bottom, newline + 1, MAX_TEXT - 1);
+  bottom[MAX_TEXT - 1] = '\0';
+
+  // Measure both lines
+  int dir, asc, desc;
+  XCharStruct overall_top, overall_bottom;
+
+  XTextExtents(font, top, (int)strlen(top), &dir, &asc, &desc, &overall_top);
+  XTextExtents(font, bottom, (int)strlen(bottom), &dir, &asc, &desc, &overall_bottom);
+
+  int text_h = asc + desc;
+  int line_gap = 6; // increased spacing between lines
+  int total_h = text_h * 2 + line_gap;
+
+  int base_y = (height - total_h) / 2 + asc;
+
+  int top_x = zone_x + (zone_w - overall_top.width) / 2;
+  int bottom_x = zone_x + (zone_w - overall_bottom.width) / 2;
+
+  int top_y = base_y;
+  int bottom_y = base_y + text_h + line_gap;
+
+  int pad_x = 4;
+  int pad_y = 2;
+
+  int rect_x = zone_x + (zone_w - (overall_top.width > overall_bottom.width ? overall_top.width : overall_bottom.width)) / 2 - pad_x;
+  int rect_y = top_y - asc - pad_y;
+  int rect_w = (overall_top.width > overall_bottom.width ? overall_top.width : overall_bottom.width) + pad_x * 2;
+  int rect_h = total_h + pad_y * 2;
+
+  XFillRectangle(display, window, fill_gc, rect_x, rect_y, rect_w, rect_h);
+
+  // Draw top line
+  XDrawString(display, window, shadow_gc, top_x + 1, top_y + 1, top, (int)strlen(top));
+  XDrawString(display, window, text_gc, top_x, top_y, top, (int)strlen(top));
+
+  // Draw bottom line
+  XDrawString(display, window, shadow_gc, bottom_x + 1, bottom_y + 1, bottom, (int)strlen(bottom));
+  XDrawString(display, window, text_gc, bottom_x, bottom_y, bottom, (int)strlen(bottom));
 }
 
 static void apply_window_shape(Display *display, Window window, XFontStruct *font, const Config *config, const OverlayState *state) {
@@ -331,7 +462,7 @@ static void apply_window_shape(Display *display, Window window, XFontStruct *fon
     if (text_rect_for_zone(font, 0, zone_w, config->height, state->left, false, &rects[rect_count], NULL, NULL)) {
       rect_count++;
     }
-    if (text_rect_for_zone(font, zone_w, zone_w, config->height, state->center, true, &rects[rect_count], NULL, NULL)) {
+    if (text_rect_for_zone_multiline(font, zone_w, zone_w, config->height, state->center, &rects[rect_count])) {
       rect_count++;
     }
     if (text_rect_for_zone(font, zone_w * 2, config->width - (zone_w * 2), config->height, state->right, false, &rects[rect_count], NULL, NULL)) {
@@ -437,10 +568,10 @@ int main(int argc, char **argv) {
   XSelectInput(display, window, ExposureMask);
   XMapRaised(display, window);
 
-  XFontStruct *font = XLoadQueryFont(display, DEFAULT_FONT);
-  if (!font) font = XLoadQueryFont(display, FALLBACK_FONT);
+  XFontStruct *font = XLoadQueryFont(display, FALLBACK_FONT);
+
   if (!font) {
-    fprintf(stderr, "[arcade-retro-overlay] failed to load font\n");
+    fprintf(stderr, "[arcade-retro-overlay] failed to load fallback font\n");
     XDestroyWindow(display, window);
     XCloseDisplay(display);
     return 1;

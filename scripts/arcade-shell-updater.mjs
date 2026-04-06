@@ -98,6 +98,25 @@ function restartManagedServices(serviceNames) {
   run('systemctl', ['--no-block', 'restart', ...names])
 }
 
+function ensureSystemFonts() {
+  console.log('[arcade-shell-updater] ensuring system fonts')
+
+  try {
+    run('sh', [
+      '-lc',
+      `
+        apt-get update -y &&
+        apt-get install -y --no-install-recommends \
+          fonts-dejavu-core \
+          fonts-liberation \
+          fonts-noto-core
+        `,
+    ])
+  } catch (err) {
+    console.warn('[arcade-shell-updater] font install failed:', err.message)
+  }
+}
+
 function isNetworkError(error) {
   const message = String(error?.message || '').toLowerCase()
   return (
@@ -728,6 +747,7 @@ async function maybeInstallShellUpdate({
   await installEtcPayload(installDir)
   await installManagedBootAndSessionFiles(installDir)
   await installSystemdUnits(extractDir, systemdTarget)
+  ensureSystemFonts()
   try {
     run('systemctl', ['restart', 'NetworkManager'])
 

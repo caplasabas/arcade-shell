@@ -2066,6 +2066,28 @@ export default function App() {
           finalizeWithdrawFlow(payload.dispensed)
           return
         }
+        if (payload.type === 'WITHDRAW_ABORTED') {
+          forwardToCasino()
+
+          const dispensed = Number(payload.dispensed ?? 0)
+          const requested = Number(payload.requested ?? withdrawRequestedAmountRef.current ?? 0)
+
+          setIsWithdrawingRef.current(false)
+          setShowWithdrawModalRef.current(false)
+
+          if (dispensed > 0) {
+            flashUiNotice(`PARTIAL WITHDRAW ${formatPeso(dispensed)} / ${formatPeso(requested)}`)
+          } else {
+            flashUiNotice('WITHDRAW ABORTED')
+          }
+
+          setWithdrawAmount(requested || MIN)
+          withdrawRequestedAmountRef.current = 0
+          setWithdrawRequestedAmount(0)
+          setWithdrawRemainingAmount(0)
+
+          return
+        }
       }
 
       // ----------------------------------
@@ -2208,6 +2230,26 @@ export default function App() {
 
         if (payload.type === 'WITHDRAW_COMPLETE') {
           finalizeWithdrawFlow(payload.dispensed)
+          return
+        }
+        if (payload.type === 'WITHDRAW_ABORTED') {
+          const dispensed = Number(payload.dispensed ?? 0)
+          const requested = Number(payload.requested ?? withdrawRequestedAmountRef.current ?? 0)
+
+          setIsWithdrawingRef.current(false)
+          setShowWithdrawModalRef.current(false)
+
+          if (dispensed > 0) {
+            flashUiNotice(`PARTIAL WITHDRAW ${formatPeso(dispensed)} / ${formatPeso(requested)}`)
+          } else {
+            flashUiNotice('WITHDRAW ABORTED')
+          }
+
+          setWithdrawAmount(requested || MIN)
+          withdrawRequestedAmountRef.current = 0
+          setWithdrawRequestedAmount(0)
+          setWithdrawRemainingAmount(0)
+
           return
         }
 
