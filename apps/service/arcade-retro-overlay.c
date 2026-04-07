@@ -125,9 +125,30 @@ static void normalize_overlay_text(char *text) {
   for (size_t i = 0; text[i] != '\0' && out + 1 < sizeof(normalized);) {
     const unsigned char ch = (unsigned char)text[i];
 
-    if (ch == 0xE2 && (unsigned char)text[i + 1] == 0x82 && (unsigned char)text[i + 2] == 0xB1) {
-      normalized[out++] = 'P';
-      i += 3;
+   if (ch == 0xE2 &&
+       text[i + 1] != '\0' &&
+       text[i + 2] != '\0' &&
+       (unsigned char)text[i + 1] == 0x82 &&
+       (unsigned char)text[i + 2] == 0xB1) {
+
+     // Replace ₱ with "PHP "
+     if (out + 4 < sizeof(normalized)) {
+       normalized[out++] = 'P';
+       normalized[out++] = 'H';
+       normalized[out++] = 'P';
+       normalized[out++] = ' ';
+     }
+
+     i += 3;
+     continue;
+   }
+
+
+    if (ch == 0xC2 &&
+        text[i + 1] != '\0' &&
+        (unsigned char)text[i + 1] == 0xB7) {
+      normalized[out++] = '-';
+      i += 2;
       continue;
     }
 
@@ -141,6 +162,8 @@ static void normalize_overlay_text(char *text) {
   size_t wb_out = 0;
   for (size_t i = 0; normalized[i] != '\0' && wb_out + 1 < sizeof(with_break);) {
     if (normalized[i] == ' ' &&
+        normalized[i + 1] != '\0' &&
+        normalized[i + 2] != '\0' &&
         normalized[i + 1] == '|' &&
         normalized[i + 2] == ' ') {
       with_break[wb_out++] = '\n';
@@ -568,10 +591,10 @@ int main(int argc, char **argv) {
   XSelectInput(display, window, ExposureMask);
   XMapRaised(display, window);
 
-  XFontStruct *font = XLoadQueryFont(display, FALLBACK_FONT);
-
+  XFontStruct *font = XLoadQueryFont(display, DEFAULT_FONT);
+  if (!font) font = XLoadQueryFont(display, FALLBACK_FONT);
   if (!font) {
-    fprintf(stderr, "[arcade-retro-overlay] failed to load fallback font\n");
+    fprintf(stderr, "[arcade-retro-overlay] failed to load font\n");
     XDestroyWindow(display, window);
     XCloseDisplay(display);
     return 1;

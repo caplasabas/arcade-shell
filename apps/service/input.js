@@ -101,7 +101,11 @@ const HOPPER_TOPUP_COIN_VALUE = 20
 
 // Coin timing (measured FAST mode)
 const COIN_IDLE_GAP_MS = 130
-const COIN_BATCH_GAP_MS = 180
+const COIN_PESO_BY_PULSE_COUNT = {
+  1: 5,
+  2: 10,
+  4: 20,
+}
 
 // ============================
 // STATE
@@ -115,8 +119,6 @@ let player2 = null
 // -------- Deposit coins --------
 let depositPulseCount = 0
 let depositIdleTimer = null
-let depositBatchCredits = 0
-let depositBatchTimer = null
 let depositLastPulseTime = 0
 let depositStartTime = 0
 
@@ -1319,21 +1321,23 @@ function getArcadeRetroFooterState(balanceOverride = null) {
   const p2BlockedMidRun = joinMode === 'alternating' && sessionPhase === 'live'
   const p2Disabled = joinMode === 'single_only'
 
+  const isOffline = typeof hasLocalNetworkLink === 'function' && !hasLocalNetworkLink()
+
   let leftBase
 
   if (gameOverState.P1) {
     leftBase = 'P1 · GAME OVER'
+  } else if (isOffline) {
+    leftBase = 'P1 · OFFLINE'
   } else if (arcadeCredit > 0) {
     if (p1HasCredit) {
-      leftBase = p1ConfirmArmed ? 'P1 · START' : 'P1 · PLAY'
+      leftBase = p1ConfirmArmed ? 'P1 · START' : 'P1 · READY'
     } else {
       leftBase = 'P1 · START'
     }
   } else {
-    leftBase = 'P1 · BUY'
+    leftBase = 'P1 · START'
   }
-
-  const isOffline = typeof hasLocalNetworkLink === 'function' && !hasLocalNetworkLink()
 
   const centerBase = exitConfirmArmed
     ? 'EXIT GAME?'
@@ -1345,22 +1349,24 @@ function getArcadeRetroFooterState(balanceOverride = null) {
 
   if (gameOverState.P2) {
     rightBase = 'P2 · GAME OVER'
+  } else if (isOffline) {
+    rightBase = 'P2 · OFFLINE'
   } else if (arcadeCredit > 0) {
     if (!p2HasCredit) {
       if (p2Disabled) {
-        rightBase = 'SOLO'
+        rightBase = 'P2 · SOLO'
       } else if (p2BlockedMidRun) {
-        rightBase = 'WAIT'
+        rightBase = 'P2 · WAIT TURN'
       } else {
         rightBase = 'P2 · START'
       }
     } else if (p2ConfirmArmed) {
       rightBase = 'P2 · START'
     } else {
-      rightBase = 'P2 · PLAY'
+      rightBase = 'P2 · READY'
     }
   } else {
-    rightBase = 'P2 · BUY'
+    rightBase = 'P2 · START'
   }
 
   const visible = Boolean(
@@ -2319,15 +2325,21 @@ function handleDepositPulse() {
   depositLastPulseTime = now
   depositPulseCount++
 
-  dispatch({
-    type: 'COIN',
-    credits: 5,
-  })
-
   console.log(`[DEPOSIT] PULSE #${depositPulseCount} (+${gap}ms)`)
 
   if (depositIdleTimer) clearTimeout(depositIdleTimer)
   depositIdleTimer = setTimeout(finalizeDepositCoin, COIN_IDLE_GAP_MS)
+}
+
+function resolveDepositCredits(pulses) {
+  const normalizedPulses = Number(pulses || 0)
+  if (normalizedPulses <= 0) return 0
+
+  const mappedCredits = COIN_PESO_BY_PULSE_COUNT[normalizedPulses]
+  if (Number.isFinite(mappedCredits)) return mappedCredits
+
+  // Fallback keeps legacy behavior for unmapped pulse counts.
+  return normalizedPulses * 5
 }
 
 function finalizeDepositCoin() {
@@ -2335,32 +2347,21 @@ function finalizeDepositCoin() {
   const duration = Date.now() - depositStartTime
 
   resetDepositCoin()
+  if (pulses <= 0) return
 
-  console.log(`[DEPOSIT] COIN pulses=${pulses} duration=${duration}ms`)
-
-  depositBatchCredits += pulses
-
-  if (depositBatchTimer) clearTimeout(depositBatchTimer)
-  depositBatchTimer = setTimeout(flushDepositBatch, COIN_BATCH_GAP_MS)
-}
-
-function flushDepositBatch() {
-  if (depositBatchCredits <= 0) return
+  const finalCredits = resolveDepositCredits(pulses)
   if (arcadeSession?.active) {
     arcadeSession.lastBalanceMutationAt = Date.now()
   }
 
-  const finalCredits = depositBatchCredits * 5
+  console.log(`[DEPOSIT] COIN pulses=${pulses} duration=${duration}ms credits=${finalCredits}`)
 
-  console.log(`[DEPOSIT] BATCH FINAL credits=${finalCredits}`)
+  if (finalCredits <= 0) return
 
-  // dispatch({
-  //   type: 'COIN',
-  //   credits: finalCredits,
-  // })
-
-  depositBatchCredits = 0
-  depositBatchTimer = null
+  dispatch({
+    type: 'COIN',
+    credits: finalCredits,
+  })
 }
 
 function resetDepositCoin() {
@@ -3304,6 +3305,12 @@ function handleKey(source, index, value) {
 
     // 🔴 GLOBAL BUY HANDLER (always intercept before dispatch)
     if (value === 1 && JOYSTICK_BUTTON_MAP[index] === 'BUY') {
+      const isArcadeContext = retroarchActive && !!retroarchCurrentGameId
+
+      if (!isArcadeContext) {
+        dispatch({ type: 'ACTION', action: 'BUY' })
+        return
+      }
       if (buyState === 'processing') return
 
       handleBuyPressed()
