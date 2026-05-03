@@ -1,0 +1,43 @@
+[Unit]
+Description=Arcade Input Service
+Wants=network-online.target arcade-retro-x.service
+After=network-online.target arcade-retro-x.service
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/arcade/service
+EnvironmentFile=-/opt/arcade/os/.env.arcade-service
+
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/arcade1/.Xauthority
+Environment=GAME_PACKAGE_KEY_HEX=e93e36263af461dd686403aa98b20a1e084818359af81258fdb9b17828940620
+Environment=ARCADE_RUNTIME_GAMES_DIR=/dev/shm/arcade-games
+Environment=ARCADE_RUNTIME_DIR=/opt/arcade
+Environment=ARCADE_UI_DIST_DIR=/opt/arcade/ui/dist
+Environment=UINPUT_HELPER_PATH=/opt/arcade/bin/uinput-helper
+Environment=RETROARCH_TTY_MODE=1
+Environment=RETROARCH_TTY_X_SESSION=1
+Environment=RETROARCH_TTY_X_PREWARM=1
+Environment=ARCADE_RETRO_PREWARM_CLIENT_ENABLE=0
+Environment=ARCADE_RETRO_RUNTIME_INPUT_CONFIG_ENABLE=1
+Environment=ARCADE_SPLASH_TRANSITIONS=0
+Environment=ARCADE_UI_VT=2
+Environment=ARCADE_GAME_VT=1
+Environment=RETROARCH_PRIMARY_INPUT=P1
+Environment=RETROARCH_CONFIG_PATH=/opt/arcade/os/retroarch.cfg
+Environment=ARCADE_RETRO_BIN=/usr/bin/retroarch
+Environment=ARCADE_RETRO_OVERLAY_ENABLE=1
+Environment=CASINO_MENU_EXITS_RETROARCH=1
+ExecStartPre=/opt/arcade/os/bin/arcade-audio-init.sh
+ExecStart=/usr/bin/node /opt/arcade/service/input.bundle.cjs
+TimeoutStopSec=5
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

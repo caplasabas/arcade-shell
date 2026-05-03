@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arcade Retro Overlay</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --text: #f5f7fb;
+        --muted: rgba(245, 247, 251, 0.72);
+        --accent: #f7c44d;
+      }
+
+      * {
+        box-sizing: border-box;
+        user-select: none;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Arial Black", Impact, sans-serif;
+      }
+
+      body {
+        display: flex;
+        align-items: stretch;
+        justify-content: stretch;
+        background: transparent;
+      }
+
+      .footer {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        width: 100%;
+        height: 100%;
+        gap: 8px;
+        padding: 4px 12px 6px;
+        background: transparent;
+        opacity: 1;
+        visibility: visible;
+        transition: opacity 120ms linear;
+      }
+
+      .footer.hidden {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+
+      .zone {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 0;
+        padding: 2px 8px;
+        text-align: center;
+        color: var(--text);
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        font-size: clamp(10px, 1.15vw, 16px);
+        font-weight: 900;
+        line-height: 1;
+        text-shadow:
+          0 0 2px rgba(0, 0, 0, 0.95),
+          0 1px 3px rgba(0, 0, 0, 0.95),
+          0 0 10px rgba(0, 0, 0, 0.75);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .zone.center {
+        color: var(--accent);
+      }
+
+      .zone.idle {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="footer">
+      <section id="left" class="zone idle">Waiting</section>
+      <section id="center" class="zone center idle">Connecting</section>
+      <section id="right" class="zone idle">Waiting</section>
+    </main>
+
+    <script>
+      const leftEl = document.getElementById('left')
+      const centerEl = document.getElementById('center')
+      const rightEl = document.getElementById('right')
+
+      let lastSerialized = ''
+
+      function setZone(node, text, { center = false } = {}) {
+        const clean = String(text || '').trim() || ' '
+        node.textContent = clean
+        node.classList.toggle('idle', !String(text || '').trim())
+        node.classList.toggle('center', center)
+      }
+
+      async function refresh() {
+        try {
+          const res = await fetch('/arcade-life/overlay-state', { cache: 'no-store' })
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          const payload = await res.json()
+          const footer = payload?.footer || {}
+
+          const serialized = JSON.stringify(footer)
+          if (serialized === lastSerialized) return
+          lastSerialized = serialized
+
+          const footerEl = document.querySelector('.footer')
+          const hidden = footer.visible === false
+          footerEl?.classList.toggle('hidden', hidden)
+
+          setZone(leftEl, footer.leftText)
+          setZone(centerEl, footer.centerText, { center: true })
+          setZone(rightEl, footer.rightText)
+        } catch (error) {
+          setZone(leftEl, '')
+          setZone(centerEl, 'Overlay Offline', { center: true })
+          setZone(rightEl, '')
+          lastSerialized = ''
+        }
+      }
+
+      refresh()
+      window.setInterval(refresh, 250)
+    </script>
+  </body>
+</html>

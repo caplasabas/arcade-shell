@@ -1,0 +1,32 @@
+{
+  "name": "arcade-service",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "",
+  "main": "input.js",
+  "scripts": {
+    "start": "node input.js",
+    "dev": "npm run start:bundle",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:scaffold": "tsc -p tsconfig.build.json",
+    "start:scaffold": "node dist/cli.js",
+    "bundle": "node ./scripts/build-bundle.mjs",
+    "start:bundle": "node dist/input.bundle.cjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "joystick": "^0.1.2",
+    "node-fetch": "^3.3.2",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.25.11",
+    "typescript": "~5.9.3"
+  }
+}

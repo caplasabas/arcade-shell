@@ -1,0 +1,72 @@
+# ==============================
+# Node (all packages)
+# ==============================
+**/node_modules/
+**/dist/
+**/build/
+**/.vite/
+**/*.log
+
+# ==============================
+# Environment files
+# ==============================
+**/.env
+**/.env.*
+!.env.example
+
+# ==============================
+# OS export (dev only)
+# ==============================
+os-export/
+os-export-temp/
+
+# Uncomment if OS snapshot should NOT be tracked
+# os/
+
+# ==============================
+# Packaged casino builds
+# ==============================
+/apps/ui/public/games/*
+!/apps/ui/public/games/.keep
+
+# ==============================
+# JetBrains
+# ==============================
+.idea/
+*.iml
+
+# ==============================
+# System junk
+# ==============================
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Runtime artifacts
+# ==============================
+tmp/
+*.pid
+
+# ==============================
+# SSH / Keys
+# ==============================
+*.pem
+*.key
+id_rsa*
+
+/apps/ui/public/roms/
+/apps/service/src/input.ts.device-write-backend-backup
+/apps/service/src/input.ts.runtime-backup
+/apps/service/src/input.ts.device-backend-backup
+/apps/service/src/input.ts.backend-sync-backup
+/apps/service/src/input.ts.arcade-time-backup
+/device_metric_events_rows.sql
+/prod_data.sql
+
+# Local/build artifacts
+.pi-sync-build/
+dist-package/
+default/
+backup/
+.tmp-input.bundle.cjs
+fbneo_libretro.so

@@ -1,0 +1,27 @@
+[Unit]
+Description=Arcade Xorg + Chromium Kiosk
+After=arcade-input.service systemd-user-sessions.service
+Requires=arcade-input.service
+
+[Service]
+User=arcade1
+Environment=DISPLAY=:0
+
+TTYPath=/dev/tty2
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+PermissionsStartOnly=true
+ExecStartPre=/opt/arcade/os/bin/arcade-audio-init.sh
+ExecStartPre=/usr/bin/rm -f /home/arcade1/.Xauthority-c /home/arcade1/.Xauthority-l
+ExecStart=/usr/bin/startx /home/arcade1/.xinitrc -- :0 vt2 -nocursor -nolisten tcp -ac
+TimeoutStopSec=8
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

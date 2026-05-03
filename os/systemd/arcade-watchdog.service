@@ -1,0 +1,31 @@
+[Unit]
+Description=Arcade watchdog
+After=network-online.target arcade-input.service arcade-ui.service
+Wants=network-online.target arcade-input.service arcade-ui.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/arcade-watchdog.sh
+Restart=always
+RestartSec=5
+WatchdogSec=60
+KillMode=process
+KillSignal=SIGINT
+EnvironmentFile=-/etc/default/arcade-watchdog.env
+Environment=CHECK_INTERVAL=10
+Environment=STARTUP_GRACE_SEC=30
+Environment=INPUT_FAILURE_RESTART_THRESHOLD=3
+Environment=INPUT_LINK_STATUS_URL=http://127.0.0.1:5174/input-link-status
+Environment=INPUT_LINK_FAILURE_RESTART_THRESHOLD=3
+Environment=UI_SERVICE_NAME=arcade-ui.service
+Environment=UI_HEALTH_URL=http://127.0.0.1:5174/
+Environment=UI_FAILURE_RESTART_THRESHOLD=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arcade-watchdog
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+[Unit]
+Description=Arcade Controlled Splash
+DefaultDependencies=no
+After=local-fs.target
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=arcade-ui.service
+Before=getty@tty3.service
+Conflicts=getty@tty3.service
+
+[Service]
+Type=simple
+User=root
+Environment=SPLASH_IMAGE_PRIMARY=/opt/arcade/os/boot/boot.png
+Environment=SPLASH_IMAGE_FALLBACK=/boot/firmware/splash.png
+ExecStartPre=/bin/sh -lc 'for i in $(seq 1 50); do [ -e /dev/fb0 ] && exit 0; sleep 0.1; done; exit 1'
+ExecStart=/bin/sh -lc 'IMG="$SPLASH_IMAGE_PRIMARY"; if [ ! -f "$IMG" ]; then IMG="$SPLASH_IMAGE_FALLBACK"; fi; exec /usr/bin/fbi -T 3 -d /dev/fb0 -noverbose -a "$IMG" </dev/tty3 >/dev/tty3 2>/dev/tty3'
+ExecStop=/usr/bin/killall fbi
+TTYPath=/dev/tty3
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+RemainAfterExit=yes
+Restart=no
+
+[Install]
+WantedBy=sysinit.target

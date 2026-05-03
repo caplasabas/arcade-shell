@@ -1,0 +1,90 @@
+import { Game } from '../App'
+
+const GAME_LIST: Game[] = [
+  {
+    id: 'bikermice',
+    name: 'Bikermice',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/bikermice.jpeg',
+  },
+  {
+    id: 'contra',
+    name: 'Contra 2',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/contra.png',
+  },
+  {
+    id: 'gradius',
+    name: 'Gradius 3',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/gradius.jpeg',
+  },
+  {
+    id: 'puzzlebobble',
+    name: 'Puzzle Bobble',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/puzzlebobble.jpg',
+  },
+  {
+    id: 'streetfighter',
+    name: 'Street Fighter Turbo',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/streetfighter.jpeg',
+  },
+  {
+    id: 'bomberman',
+    name: 'Super Bomberman',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/bomberman.jpg',
+  },
+  {
+    id: 'mario',
+    name: 'Super Mario World',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/mario.jpg',
+  },
+  {
+    id: 'topgear',
+    name: 'Top Gear',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/topgear.png',
+  },
+  {
+    id: 'mortalkombat',
+    name: 'Ultimate Mortal Kombat',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/mortalkombat.jpg',
+  },
+  {
+    id: 'tekken',
+    name: 'Tekken 2',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/tekken.jpeg',
+  },
+  {
+    id: 'xmen',
+    name: 'X-Men',
+    type: 'arcade',
+    price: 10,
+    art: 'assets/boxart/xmen.jpg',
+  },
+
+  {
+    id: 'ultraace',
+    name: 'Ultraman Ace',
+    type: 'casino',
+    price: 0,
+    art: 'assets/boxart/ultraman.jpeg',
+    theme: 'neon',
+  },
+]

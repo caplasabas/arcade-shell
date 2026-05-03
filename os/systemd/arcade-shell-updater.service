@@ -1,0 +1,32 @@
+[Unit]
+Description=Arcade Shell Auto Updater
+After=arcade-ui.service network-online.target NetworkManager-wait-online.service
+Wants=network-online.target NetworkManager-wait-online.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/opt/arcade/os/.env.arcade-service
+EnvironmentFile=-/etc/default/arcade-shell-updater.env
+Environment=NODE_ENV=production
+Environment=ARCADE_SHELL_INSTALL_DIR=/opt/arcade
+Environment=ARCADE_SHELL_VERSION_FILE=/opt/arcade/os/.arcade-shell-version
+Environment=ARCADE_SHELL_UPDATER_DEST=/usr/local/bin/arcade-shell-updater.mjs
+Environment=ARCADE_SHELL_SYSTEMD_DIR=/etc/systemd/system
+Environment=ARCADE_SHELL_NETWORK_TIMEOUT_MS=20000
+Environment=ARCADE_SHELL_PACKAGE_TIMEOUT_MS=180000
+Environment=ARCADE_SHELL_AUTO_UPDATE=1
+Environment=ARCADE_SHELL_REBOOT_ON_UPDATE=0
+Environment=ARCADE_SHELL_START_DELAY_MS=0
+Environment=ARCADE_SHELL_IDLE_WAIT_MS=0
+Environment=ARCADE_SHELL_IDLE_POLL_MS=5000
+Environment=ARCADE_SHELL_IDLE_CHECK_URL=http://127.0.0.1:5174/arcade-life/overlay-state
+Environment=ARCADE_SHELL_SERVICES=arcade-input.service,arcade-ui.service
+ExecStart=/usr/local/bin/arcade-shell-updater.mjs
+TimeoutStartSec=120
+StandardOutput=journal
+
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

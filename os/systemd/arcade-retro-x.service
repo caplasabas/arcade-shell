@@ -1,0 +1,19 @@
+[Unit]
+Description=Arcade Prewarmed Game Xorg
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+User=root
+Environment=DISPLAY=:1
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/lib/xorg/Xorg :1 vt1 -nocursor -nolisten tcp -ac
+TimeoutStopSec=8
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
