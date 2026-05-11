@@ -1873,6 +1873,11 @@ let internetLastStableState = 'unknown'
 let internetBootGraceUntil = Date.now() + 3000 // 3s boot grace
 let coinInhibitedByNetwork = false // Track if coins are inhibited due to network
 
+function setNetworkCoinInhibit(disabled) {
+  setCoinInhibit(disabled)
+  coinInhibitedByNetwork = disabled
+}
+
 async function checkInternetReachability() {
   try {
     const res = await checkCabinetBackendReachability()
@@ -1891,10 +1896,9 @@ async function checkInternetReachability() {
             internetLastStableState = 'ok'
             dispatch({ type: 'INTERNET_OK' })
 
-            // Re-enable coins only if we inhibited them due to network
+            // Re-enable coins only if the connectivity guard inhibited them.
             if (coinInhibitedByNetwork) {
-              setCoinInhibit(false)
-              coinInhibitedByNetwork = false
+              setNetworkCoinInhibit(false)
             }
           }, 800)
         }
@@ -1926,8 +1930,7 @@ async function checkInternetReachability() {
 
       // Immediately inhibit coins - no debounce
       if (!coinInhibitedByNetwork) {
-        setCoinInhibit(true)
-        coinInhibitedByNetwork = true
+        setNetworkCoinInhibit(true)
       }
     }
   }
@@ -1967,8 +1970,9 @@ async function checkCabinetBackendReachability() {
   }
 }
 
-// Default to safe (reject coins) during boot stabilization
-setCoinInhibit(true)
+// Default to safe (reject coins) during boot stabilization. Treat this as
+// connectivity-owned so the first confirmed online state always re-enables coins.
+setNetworkCoinInhibit(true)
 // Ensure first stable state resolves after boot
 setTimeout(() => {
   internetBootGraceUntil = 0
