@@ -69,6 +69,13 @@ const AUTO_BOOT_UPDATE_CHECK = true
 const DEVICE_HEARTBEAT_MS = 15000
 const DEVICE_PLAYING_IDLE_MS = 300000 // 5 minutes
 
+function formatCooldownRemaining(ms: number) {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
 type NetworkStage = 'boot' | 'ok' | 'no-internet' | 'wifi-form'
 
 type SettingsItem = 'volume' | 'network' | 'reboot' | 'shutdown'
@@ -114,6 +121,8 @@ type CasinoWithdrawState = {
   isWithdrawing: boolean
   min: number
   step: number
+  cooldownRemainingMs: number
+  cooldownUntil: string | null
 }
 
 type CasinoMenuExitState = {
@@ -124,6 +133,8 @@ type WithdrawLimitsState = {
   hopperBalance: number | null
   maxWithdrawalAmount: number | null
   enabled: boolean
+  cooldownRemainingMs: number
+  cooldownUntil: string | null
 }
 
 type DeploymentMode = 'online' | 'standby' | 'maintenance'
@@ -686,6 +697,8 @@ export default function App() {
   }
 
   function shouldGuardCasinoAccounting(events: MetricEvent[]) {
+    if (shellStateRef.current.deploymentMode === 'maintenance') return false
+
     const guard = casinoEntryGuardRef.current
     if (!guard.unlockAt) return false
 
@@ -728,6 +741,8 @@ export default function App() {
     isWithdrawing: false,
     min: 20,
     step: 20,
+    cooldownRemainingMs: 0,
+    cooldownUntil: null,
   })
   const casinoWithdrawStateRef = useRef(casinoWithdrawState)
   useEffect(() => {
@@ -744,8 +759,32 @@ export default function App() {
     hopperBalance: null,
     maxWithdrawalAmount: null,
     enabled: false,
+    cooldownRemainingMs: 0,
+    cooldownUntil: null,
   })
   const [withdrawLimitsLoading, setWithdrawLimitsLoading] = useState(false)
+  useEffect(() => {
+    if (!withdrawLimits.cooldownUntil) return
+
+    const tick = () => {
+      const cooldownUntilMs = Date.parse(withdrawLimits.cooldownUntil || '')
+      if (!Number.isFinite(cooldownUntilMs)) return
+      const cooldownRemainingMs = Math.max(0, cooldownUntilMs - Date.now())
+      setWithdrawLimits(prev => ({
+        ...prev,
+        cooldownRemainingMs,
+        enabled: cooldownRemainingMs > 0 ? false : prev.enabled,
+      }))
+    }
+
+    tick()
+    const interval = window.setInterval(tick, 1000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [withdrawLimits.cooldownUntil])
+
   useEffect(() => {
     if (!showWithdrawModal) return
 
@@ -761,6 +800,8 @@ export default function App() {
           hopperBalance?: number | null
           maxWithdrawalAmount?: number | null
           enabled?: boolean
+          cooldownRemainingMs?: number | null
+          cooldownUntil?: string | null
         } | null
         if (stopped || !data) return
 
@@ -769,6 +810,11 @@ export default function App() {
           maxWithdrawalAmount:
             typeof data.maxWithdrawalAmount === 'number' ? Number(data.maxWithdrawalAmount) : null,
           enabled: Boolean(data.enabled),
+          cooldownRemainingMs:
+            typeof data.cooldownRemainingMs === 'number'
+              ? Math.max(0, Number(data.cooldownRemainingMs))
+              : 0,
+          cooldownUntil: data.cooldownUntil ? String(data.cooldownUntil) : null,
         })
         setWithdrawLimitsLoading(false)
 
@@ -1806,12 +1852,13 @@ export default function App() {
   }
   const isValidWithdrawAmount = (amount: number, balanceValue: number) => {
     if (!Number.isFinite(amount)) return false
+    if (withdrawLimits.cooldownRemainingMs > 0) return false
     const max = getMaxSelectable(balanceValue)
     return amount >= MIN && amount <= max && amount % STEP === 0
   }
   const maxSelectable = getMaxSelectable(activeWithdrawBalance)
 
-  const isWithdrawDisabled = maxSelectable < MIN
+  const isWithdrawDisabled = maxSelectable < MIN || withdrawLimits.cooldownRemainingMs > 0
 
   const addWithdrawAmount = () => {
     if (isWithdrawDisabled) return
@@ -1908,9 +1955,23 @@ export default function App() {
         flashUiNotice('WITHDRAW DISABLED')
         return
       }
+      if (message.toLowerCase().includes('cooldown')) {
+        const cooldownText =
+          withdrawLimits.cooldownRemainingMs > 0
+            ? formatCooldownRemaining(withdrawLimits.cooldownRemainingMs)
+            : null
+        flashUiNotice(cooldownText ? `WAIT ${cooldownText}` : 'WITHDRAW COOLDOWN')
+        return
+      }
       flashUiNotice('WITHDRAW FAILED')
     }
-  }, [activeWithdrawBalance, flashUiNotice, isWithdrawing, withdrawAmount])
+  }, [
+    activeWithdrawBalance,
+    flashUiNotice,
+    isWithdrawing,
+    withdrawAmount,
+    withdrawLimits.cooldownRemainingMs,
+  ])
 
   const finalizeWithdrawFlow = useCallback(
     (dispensedAmount: number) => {
@@ -1936,8 +1997,8 @@ export default function App() {
       return
     }
     withdrawInputLockedUntilRef.current = Date.now() + WITHDRAW_INPUT_DEBOUNCE_MS
-    if (deploymentMode !== 'online') {
-      flashUiNotice('UNDER MAINTENANCE')
+    if (deploymentMode === 'standby') {
+      flashUiNotice('STANDBY')
       return
     }
 
@@ -1947,6 +2008,10 @@ export default function App() {
     }
 
     const next = casinoWithdrawStateRef.current
+    if (next.cooldownRemainingMs > 0) {
+      flashUiNotice(`WAIT ${formatCooldownRemaining(next.cooldownRemainingMs)}`)
+      return
+    }
     if (!runningCasinoRef.current || !next.canOpen || next.isWithdrawing) return
 
     const max = getMaxSelectable(next.balance)
@@ -2043,6 +2108,8 @@ export default function App() {
       isWithdrawing: false,
       min: 20,
       step: 20,
+      cooldownRemainingMs: 0,
+      cooldownUntil: null,
     })
     setInitialized(false)
 
@@ -2258,6 +2325,8 @@ export default function App() {
           isWithdrawing: Boolean(data.isWithdrawing),
           min: Number(data.min ?? 20),
           step: Number(data.step ?? 20),
+          cooldownRemainingMs: Math.max(0, Number(data.cooldownRemainingMs ?? 0)),
+          cooldownUntil: data.cooldownUntil ? String(data.cooldownUntil) : null,
         }
 
         setCasinoWithdrawState(nextState)
@@ -2353,9 +2422,12 @@ export default function App() {
                 {
                   type: 'ARCADE_ACCOUNTING_RESPONSE',
                   requestId,
-                  ok: true,
+                  ok: false,
                   guarded: true,
-                  jackpotPayout: 0,
+                  error: {
+                    message: 'Casino accounting blocked during startup guard',
+                    code: 'casino_accounting_guarded',
+                  },
                 },
                 '*',
               )
@@ -3227,6 +3299,8 @@ export default function App() {
       isWithdrawing: false,
       min: 20,
       step: 20,
+      cooldownRemainingMs: 0,
+      cooldownUntil: null,
     })
     setCasinoMenuExitState({ canExit: false })
     setRunningGame(null)
@@ -3613,8 +3687,8 @@ export default function App() {
       runningCasino,
     })
 
-    if (deploymentMode !== 'online') {
-      flashUiNotice('UNDER MAINTENANCE')
+    if (deploymentMode === 'standby') {
+      flashUiNotice('STANDBY')
       return
     }
 
@@ -4105,6 +4179,7 @@ export default function App() {
           loading={withdrawLimitsLoading}
           available={withdrawLimits.enabled}
           maxSelectableAmount={maxSelectable >= MIN ? maxSelectable : 0}
+          cooldownRemainingMs={withdrawLimits.cooldownRemainingMs}
           elevated={runningCasino}
           onAddAmount={addWithdrawAmount}
           onMinusAmount={minusWithdrawAmount}

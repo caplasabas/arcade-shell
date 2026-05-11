@@ -197,6 +197,14 @@ begin
       hopper_in_total = hopper_in_total + v_hopper_in,
       hopper_out_total = hopper_out_total + v_hopper_out,
       withdraw_total = withdraw_total + v_withdraw,
+      last_withdrawal_at = case when v_withdraw > 0 then now() else last_withdrawal_at end,
+      withdraw_cooldown_until = case
+        when v_withdraw > 0 then greatest(
+          coalesce(withdraw_cooldown_until, '-infinity'::timestamptz),
+          now() + interval '1 minute'
+        )
+        else withdraw_cooldown_until
+      end,
       updated_at = now()
     where device_id = p_device_id;
 
@@ -706,6 +714,14 @@ begin
     last_bet_amount = coalesce(v_last_bet_amount, last_bet_amount),
     last_bet_at = coalesce(v_last_bet_at, last_bet_at),
     withdraw_total = withdraw_total + v_withdraw,
+    last_withdrawal_at = case when v_withdraw > 0 then now() else last_withdrawal_at end,
+    withdraw_cooldown_until = case
+      when v_withdraw > 0 then greatest(
+        coalesce(withdraw_cooldown_until, '-infinity'::timestamptz),
+        now() + interval '1 minute'
+      )
+      else withdraw_cooldown_until
+    end,
     spins_total = spins_total + v_spins,
     prize_pool_contrib_total = prize_pool_contrib_total + v_pool_contrib,
     prize_pool_paid_total = prize_pool_paid_total + v_pool_paid,
@@ -873,6 +889,151 @@ $$;
 
 
 ALTER FUNCTION "public"."apply_metric_event"("p_device_id" "text", "p_event_type" "text", "p_amount" numeric, "p_event_ts" timestamp with time zone, "p_metadata" "jsonb", "p_write_ledger" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."return_happy_override_win_overflow"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_overflow numeric := greatest(coalesce(new.requested_amount, 0) - coalesce(new.accepted_amount, 0), 0);
+  v_releasable numeric := 0;
+  v_override public.device_happy_hour_overrides%rowtype;
+begin
+  if v_overflow <= 0.0001 or coalesce(new.override_paid_amount, 0) <= 0 then
+    return new;
+  end if;
+
+  select *
+    into v_override
+  from public.device_happy_hour_overrides
+  where id = new.override_id
+  for update;
+
+  if not found then
+    return new;
+  end if;
+
+  v_releasable := least(v_overflow, greatest(coalesce(v_override.amount_remaining, 0), 0));
+
+  if v_releasable <= 0.0001 then
+    return new;
+  end if;
+
+  update public.device_happy_hour_overrides
+  set
+    amount_remaining = greatest(0, amount_remaining - v_releasable),
+    status = case
+      when greatest(0, amount_remaining - v_releasable) <= 0 then 'completed'
+      else status
+    end,
+    completed_at = case
+      when greatest(0, amount_remaining - v_releasable) <= 0 then coalesce(completed_at, new.event_ts, now())
+      else completed_at
+    end,
+    updated_at = now(),
+    metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+      'lastOverflowReturnedToHappyPool', v_releasable,
+      'lastOverflowReturnedAt', coalesce(new.event_ts, now())
+    )
+  where id = new.override_id
+  returning * into v_override;
+
+  update public.casino_runtime
+  set
+    prize_pool_balance = greatest(coalesce(prize_pool_balance, 0) + v_releasable, 0),
+    updated_at = now()
+  where id = true;
+
+  new.override_remaining_after := greatest(coalesce(new.override_remaining_after, 0) - v_releasable, 0);
+  new.metadata := coalesce(new.metadata, '{}'::jsonb) || jsonb_build_object(
+    'happyOverrideOverflowReturnedToPool', v_releasable,
+    'happyOverrideOverflowPool', 'happy',
+    'happyOverrideRemainingAfterOverflowReturn', new.override_remaining_after
+  );
+
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."return_happy_override_win_overflow"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."return_happy_override_over_cap_win"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_releasable numeric := 0;
+  v_override public.device_happy_hour_overrides%rowtype;
+begin
+  if lower(coalesce(new.funding_source, '')) not in ('device_happy_override', 'dashboard_device_happy_override', 'happy_override') then
+    return new;
+  end if;
+
+  if coalesce(new.over_amount, 0) <= 0.0001 then
+    return new;
+  end if;
+
+  select *
+    into v_override
+  from public.device_happy_hour_overrides
+  where device_id = new.device_id
+    and status = 'active'
+    and amount_remaining > 0
+  order by created_at desc, id desc
+  limit 1
+  for update;
+
+  if not found then
+    return new;
+  end if;
+
+  v_releasable := least(greatest(coalesce(new.over_amount, 0), 0), greatest(coalesce(v_override.amount_remaining, 0), 0));
+
+  if v_releasable <= 0.0001 then
+    return new;
+  end if;
+
+  update public.device_happy_hour_overrides
+  set
+    amount_remaining = greatest(0, amount_remaining - v_releasable),
+    status = case
+      when greatest(0, amount_remaining - v_releasable) <= 0 then 'completed'
+      else status
+    end,
+    completed_at = case
+      when greatest(0, amount_remaining - v_releasable) <= 0 then coalesce(completed_at, new.event_ts, now())
+      else completed_at
+    end,
+    updated_at = now(),
+    metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+      'lastOverCapReturnedToHappyPool', v_releasable,
+      'lastOverCapReturnedAt', coalesce(new.event_ts, now())
+    )
+  where id = v_override.id
+  returning * into v_override;
+
+  update public.casino_runtime
+  set
+    prize_pool_balance = greatest(coalesce(prize_pool_balance, 0) + v_releasable, 0),
+    updated_at = now()
+  where id = true;
+
+  new.metadata := coalesce(new.metadata, '{}'::jsonb) || jsonb_build_object(
+    'happyOverrideOverCapReturnedToPool', v_releasable,
+    'happyOverrideOverCapPool', 'happy',
+    'happyOverrideId', v_override.id,
+    'happyOverrideRemainingAfterOverCapReturn', greatest(coalesce(v_override.amount_remaining, 0), 0)
+  );
+
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."return_happy_override_over_cap_win"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."apply_metric_events"("p_events" "jsonb", "p_write_ledger" boolean DEFAULT true) RETURNS "void"
@@ -5580,6 +5741,8 @@ CREATE TABLE IF NOT EXISTS "public"."devices" (
     "last_seen_at" timestamp with time zone,
     "last_activity_at" timestamp with time zone,
     "withdraw_enabled" boolean DEFAULT false NOT NULL,
+    "last_withdrawal_at" timestamp with time zone,
+    "withdraw_cooldown_until" timestamp with time zone,
     "avg_bet_amount" numeric DEFAULT 0 NOT NULL,
     "last_network_latency" integer,
     CONSTRAINT "devices_current_game_type_check" CHECK ((("current_game_type" IS NULL) OR ("current_game_type" = ANY (ARRAY['arcade'::"text", 'casino'::"text"])))),
@@ -6575,7 +6738,9 @@ CREATE TABLE IF NOT EXISTS "public"."live_config" (
     "red_wild_chance" double precision,
     "reel_weights" "jsonb",
     "reel_weights_free" "jsonb",
-    "happy_hour" boolean DEFAULT false
+    "happy_hour" boolean DEFAULT false,
+    "marquee" "jsonb",
+    "side_ads" "jsonb"
 );
 
 
@@ -6999,6 +7164,14 @@ CREATE OR REPLACE TRIGGER "trg_apply_device_ledger" AFTER INSERT ON "public"."de
 
 
 
+CREATE OR REPLACE TRIGGER "trg_return_happy_override_win_overflow" BEFORE INSERT ON "public"."device_happy_hour_override_wins" FOR EACH ROW EXECUTE FUNCTION "public"."return_happy_override_win_overflow"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_return_happy_override_over_cap_win" BEFORE INSERT ON "public"."over_cap_win_events" FOR EACH ROW EXECUTE FUNCTION "public"."return_happy_override_over_cap_win"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_auto_enable_global_games_for_new_device" AFTER INSERT ON "public"."devices" FOR EACH ROW EXECUTE FUNCTION "public"."auto_enable_global_games_for_new_device"();
 
 
@@ -7265,6 +7438,9 @@ CREATE POLICY "insert device" ON "public"."devices" FOR INSERT WITH CHECK (true)
 
 
 ALTER TABLE "public"."live_config" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "insert config" ON "public"."live_config" FOR INSERT WITH CHECK (true);
 
 
 CREATE POLICY "read config" ON "public"."live_config" FOR SELECT USING (true);
@@ -7925,10 +8101,3 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
-
-
-
-
-
-

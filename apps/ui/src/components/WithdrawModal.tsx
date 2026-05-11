@@ -7,6 +7,7 @@ type Props = {
   requestedAmount: number
   remainingAmount: number
   maxSelectableAmount: number
+  cooldownRemainingMs?: number
   loading?: boolean
   available?: boolean
   elevated?: boolean
@@ -22,6 +23,7 @@ export function WithdrawModal({
   requestedAmount,
   remainingAmount,
   maxSelectableAmount,
+  cooldownRemainingMs = 0,
   loading = false,
   available = true,
   elevated = false,
@@ -31,9 +33,16 @@ export function WithdrawModal({
   onCancel,
 }: Props) {
   const canAfford =
-    !loading && available && maxSelectableAmount > 0 && withdrawAmount <= maxSelectableAmount
+    !loading &&
+    cooldownRemainingMs <= 0 &&
+    available &&
+    maxSelectableAmount > 0 &&
+    withdrawAmount <= maxSelectableAmount
   const activeAmount = isWithdrawing ? remainingAmount : withdrawAmount
-  const unavailable = !loading && (!available || maxSelectableAmount <= 0)
+  const unavailable =
+    !loading && (!available || maxSelectableAmount <= 0 || cooldownRemainingMs > 0)
+  const cooldownSeconds = Math.max(0, Math.ceil(cooldownRemainingMs / 1000))
+  const cooldownText = `${Math.floor(cooldownSeconds / 60)}:${String(cooldownSeconds % 60).padStart(2, '0')}`
 
   return (
     <div className={`modal-backdrop${elevated ? ' modal-backdrop-elevated' : ''}`}>
@@ -81,7 +90,15 @@ export function WithdrawModal({
             </>
           )}
 
-          {!isWithdrawing && unavailable && <div className="modal-warning">Unavailable</div>}
+          {!isWithdrawing && cooldownRemainingMs > 0 && (
+            <div className="modal-warning modal-warning-withdraw">
+              Withdraw available in {cooldownText}
+            </div>
+          )}
+
+          {!isWithdrawing && cooldownRemainingMs <= 0 && unavailable && (
+            <div className="modal-warning">Unavailable</div>
+          )}
         </div>
         {!isWithdrawing && loading && (
           <div className="withdraw-progress-overlay">

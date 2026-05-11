@@ -6,13 +6,13 @@
   "description": "",
   "main": "input.js",
   "scripts": {
-    "start": "node input.js",
+    "start": "DOTENV_CONFIG_PATH=../../.env.arcade-service node -r dotenv/config input.js",
     "dev": "npm run start:bundle",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build:scaffold": "tsc -p tsconfig.build.json",
     "start:scaffold": "node dist/cli.js",
     "bundle": "node ./scripts/build-bundle.mjs",
-    "start:bundle": "node dist/input.bundle.cjs"
+    "start:bundle": "DOTENV_CONFIG_PATH=../../.env.arcade-service node -r dotenv/config dist/input.bundle.cjs"
   },
   "keywords": [],
   "author": "",

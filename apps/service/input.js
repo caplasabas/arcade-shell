@@ -59,6 +59,8 @@ const COIN_INHIBIT_PIN = 22
 
 const HOPPER_TIMEOUT_MS = 60000
 const HOPPER_NO_PULSE_TIMEOUT_MS = 1000
+const WITHDRAW_COOLDOWN_MS = 60 * 1000
+const COIN_WITHDRAW_GUARD_MS = 60 * 1000
 const INTERNET_PROBE_TIMEOUT_SEC = 2
 const INTERNET_MONITOR_INTERVAL_MS = 2000
 const INTERNET_FAIL_THRESHOLD = 2
@@ -137,6 +139,7 @@ let hopperLastPulseAt = 0
 let activeWithdrawalContext = null
 let withdrawRequestInFlight = false
 let outstandingWithdrawalAccountingAmount = 0
+let localWithdrawCooldownUntil = 0
 
 let serverInstance = null
 
@@ -1012,7 +1015,7 @@ async function fetchDeviceFinancialState(deviceId = DEVICE_ID) {
   const safeDeviceId = String(deviceId || '').trim()
   if (!safeDeviceId) return null
 
-  const buildDeviceStateUrl = includeWithdrawEnabled =>
+  const buildDeviceStateUrl = (selectMode = 'cooldown') =>
     `${SUPABASE_URL}/rest/v1/devices?select=${encodeURIComponent(
       [
         'device_id',
@@ -1021,34 +1024,47 @@ async function fetchDeviceFinancialState(deviceId = DEVICE_ID) {
         'hopper_balance',
         'arcade_credit',
         'arcade_time_ms',
-        includeWithdrawEnabled ? 'withdraw_enabled' : null,
+        selectMode !== 'base' ? 'withdraw_enabled' : null,
+        selectMode === 'cooldown' ? 'last_withdrawal_at' : null,
+        selectMode === 'cooldown' ? 'withdraw_cooldown_until' : null,
       ]
         .filter(Boolean)
         .join(','),
     )}&device_id=eq.${encodeURIComponent(safeDeviceId)}&limit=1`
 
-  const requestState = async includeWithdrawEnabled => {
-    const response = await requestJsonWithCurl(buildDeviceStateUrl(includeWithdrawEnabled), {
+  const requestState = async (selectMode = 'cooldown') => {
+    const response = await requestJsonWithCurl(buildDeviceStateUrl(selectMode), {
       method: 'GET',
       headers: getSupabaseHeaders(),
       timeoutMs: 2500,
     })
 
     if (
-      includeWithdrawEnabled &&
+      selectMode === 'cooldown' &&
+      !response.ok &&
+      response.status === 400 &&
+      String(response.text || '')
+        .toLowerCase()
+        .match(/last_withdrawal_at|withdraw_cooldown_until/)
+    ) {
+      return requestState('withdraw')
+    }
+
+    if (
+      selectMode === 'withdraw' &&
       !response.ok &&
       response.status === 400 &&
       String(response.text || '')
         .toLowerCase()
         .includes('withdraw_enabled')
     ) {
-      return requestState(false)
+      return requestState('base')
     }
 
     return response
   }
 
-  const response = await requestState(true)
+  const response = await requestState('cooldown')
 
   if (!response.ok) {
     console.error('[DEVICE] state fetch failed', {
@@ -1072,7 +1088,7 @@ async function fetchDeviceFinancialState(deviceId = DEVICE_ID) {
     }
 
     // retry once
-    const retry = await requestState(true)
+    const retry = await requestState('cooldown')
 
     if (!retry.ok) {
       console.error('[DEVICE] state fetch retry failed', {
@@ -1101,6 +1117,8 @@ async function fetchDeviceFinancialState(deviceId = DEVICE_ID) {
       arcadeCredit: Number(retryRow.arcade_credit || 0),
       arcadeTimeMs: Math.max(0, Number(retryRow.arcade_time_ms || 0)),
       withdrawEnabled: Boolean(retryRow.withdraw_enabled),
+      lastWithdrawalAt: retryRow.last_withdrawal_at || null,
+      withdrawCooldownUntil: retryRow.withdraw_cooldown_until || null,
     }
   }
 
@@ -1115,6 +1133,135 @@ async function fetchDeviceFinancialState(deviceId = DEVICE_ID) {
     arcadeCredit: Number(row.arcade_credit || 0),
     arcadeTimeMs: Math.max(0, Number(row.arcade_time_ms || 0)),
     withdrawEnabled: Boolean(row.withdraw_enabled),
+    lastWithdrawalAt: row.last_withdrawal_at || null,
+    withdrawCooldownUntil: row.withdraw_cooldown_until || null,
+  }
+}
+
+function parseTimestampMs(value) {
+  if (!value) return 0
+  const parsed = Date.parse(String(value))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function getWithdrawCooldownUntilMs(state = null) {
+  return Math.max(localWithdrawCooldownUntil, parseTimestampMs(state?.withdrawCooldownUntil))
+}
+
+function getWithdrawCooldownState(state = null) {
+  const cooldownUntilMs = getWithdrawCooldownUntilMs(state)
+  const remainingMs = Math.max(0, cooldownUntilMs - Date.now())
+
+  return {
+    cooldownUntilMs,
+    remainingMs,
+    cooldownUntil: cooldownUntilMs > 0 ? new Date(cooldownUntilMs).toISOString() : null,
+  }
+}
+
+async function fetchCoinWithdrawGuardState(deviceId = DEVICE_ID) {
+  const safeDeviceId = String(deviceId || '').trim()
+  if (!hasSupabaseRpcConfig() || !safeDeviceId) {
+    return {
+      remainingMs: 0,
+      cooldownUntil: null,
+      latestCoinAt: null,
+      latestPaidSpinAt: null,
+    }
+  }
+
+  try {
+    const url =
+      `${SUPABASE_URL}/rest/v1/device_metric_events?select=${encodeURIComponent(
+        'event_type,event_ts,amount,metadata',
+      )}` +
+      `&device_id=eq.${encodeURIComponent(safeDeviceId)}` +
+      '&event_type=in.(coins_in,spin)' +
+      '&order=event_ts.desc&limit=40'
+
+    const response = await requestJsonWithCurl(url, {
+      method: 'GET',
+      headers: getSupabaseHeaders(),
+      timeoutMs: 2500,
+    })
+
+    if (!response.ok) {
+      console.warn('[WITHDRAW] coin guard fetch failed', {
+        status: response.status,
+        body: response.text,
+      })
+      return {
+        remainingMs: 0,
+        cooldownUntil: null,
+        latestCoinAt: null,
+        latestPaidSpinAt: null,
+      }
+    }
+
+    const parsedRows = response.json()
+    const rows = Array.isArray(parsedRows) ? parsedRows : []
+    const latestCoin = rows.find(row => String(row?.event_type || '') === 'coins_in')
+    const latestPaidSpin = rows.find(row => {
+      if (String(row?.event_type || '') !== 'spin') return false
+      if (toMoney(row?.amount, 0) <= 0) return false
+      if (String(row?.metadata?.isFreeGame ?? '').toLowerCase() === 'true') return false
+      return true
+    })
+
+    const latestCoinAtMs = parseTimestampMs(latestCoin?.event_ts)
+    const latestPaidSpinAtMs = parseTimestampMs(latestPaidSpin?.event_ts)
+
+    if (!latestCoinAtMs || latestPaidSpinAtMs >= latestCoinAtMs) {
+      return {
+        remainingMs: 0,
+        cooldownUntil: null,
+        latestCoinAt: latestCoinAtMs ? new Date(latestCoinAtMs).toISOString() : null,
+        latestPaidSpinAt: latestPaidSpinAtMs ? new Date(latestPaidSpinAtMs).toISOString() : null,
+      }
+    }
+
+    const cooldownUntilMs = latestCoinAtMs + COIN_WITHDRAW_GUARD_MS
+    const remainingMs = Math.max(0, cooldownUntilMs - Date.now())
+
+    return {
+      remainingMs,
+      cooldownUntil: remainingMs > 0 ? new Date(cooldownUntilMs).toISOString() : null,
+      latestCoinAt: new Date(latestCoinAtMs).toISOString(),
+      latestPaidSpinAt: latestPaidSpinAtMs ? new Date(latestPaidSpinAtMs).toISOString() : null,
+    }
+  } catch (error) {
+    console.warn('[WITHDRAW] coin guard fetch failed', error?.message || error)
+    return {
+      remainingMs: 0,
+      cooldownUntil: null,
+      latestCoinAt: null,
+      latestPaidSpinAt: null,
+    }
+  }
+}
+
+async function persistWithdrawCooldown(cooldownUntilMs) {
+  const safeDeviceId = String(DEVICE_ID || '').trim()
+  if (!hasSupabaseRpcConfig() || !safeDeviceId || !Number.isFinite(cooldownUntilMs)) return
+
+  try {
+    await requestJsonWithCurl(
+      `${SUPABASE_URL}/rest/v1/devices?device_id=eq.${encodeURIComponent(safeDeviceId)}`,
+      {
+        method: 'PATCH',
+        headers: {
+          ...getSupabaseHeaders(),
+          Prefer: 'return=minimal',
+        },
+        body: {
+          last_withdrawal_at: new Date().toISOString(),
+          withdraw_cooldown_until: new Date(cooldownUntilMs).toISOString(),
+        },
+        timeoutMs: 2500,
+      },
+    )
+  } catch (error) {
+    console.warn('[WITHDRAW] cooldown persistence failed', error?.message || error)
   }
 }
 
@@ -1298,6 +1445,17 @@ async function validateWithdrawRequest(amount) {
     return { ok: false, status: 409, error: 'Withdrawal already in progress' }
   }
 
+  const localCooldown = getWithdrawCooldownState()
+  if (localCooldown.remainingMs > 0) {
+    return {
+      ok: false,
+      status: 429,
+      error: `Withdrawal cooldown active (${Math.ceil(localCooldown.remainingMs / 1000)}s)`,
+      cooldownRemainingMs: localCooldown.remainingMs,
+      cooldownUntil: localCooldown.cooldownUntil,
+    }
+  }
+
   if (!IS_PI || !hasSupabaseRpcConfig()) {
     return { ok: true, amount: requestedAmount }
   }
@@ -1311,6 +1469,11 @@ async function validateWithdrawRequest(amount) {
   const withdrawEnabled = Boolean(state?.withdrawEnabled)
   const hopperCap = getMaxWithdrawalAmountForHopperBalance(hopperBalance)
   const availableBalance = toMoney(balance - outstandingWithdrawalAccountingAmount, 0)
+  const cooldown = getWithdrawCooldownState(state)
+  const coinGuard = await fetchCoinWithdrawGuardState(DEVICE_ID)
+  const effectiveCooldownRemainingMs = Math.max(cooldown.remainingMs, coinGuard.remainingMs)
+  const effectiveCooldownUntil =
+    coinGuard.remainingMs > cooldown.remainingMs ? coinGuard.cooldownUntil : cooldown.cooldownUntil
   const maxWithdrawalAmount = withdrawEnabled
     ? Math.max(0, Math.min(availableBalance, hopperBalance, hopperCap))
     : 0
@@ -1321,6 +1484,21 @@ async function validateWithdrawRequest(amount) {
 
   if (!withdrawEnabled) {
     return { ok: false, status: 403, error: 'Withdrawal disabled for this device' }
+  }
+
+  if (effectiveCooldownRemainingMs > 0) {
+    return {
+      ok: false,
+      status: 429,
+      error: `Withdrawal cooldown active (${Math.ceil(effectiveCooldownRemainingMs / 1000)}s)`,
+      balance,
+      hopperBalance,
+      maxWithdrawalAmount,
+      cooldownRemainingMs: effectiveCooldownRemainingMs,
+      cooldownUntil: effectiveCooldownUntil,
+      latestCoinAt: coinGuard.latestCoinAt,
+      latestPaidSpinAt: coinGuard.latestPaidSpinAt,
+    }
   }
 
   if (availableBalance < requestedAmount) {
@@ -2792,10 +2970,14 @@ function startHopper(amount) {
     dispensedTotal: 0,
     startedAt: Date.now(),
   }
+  localWithdrawCooldownUntil = Date.now() + WITHDRAW_COOLDOWN_MS
+  void persistWithdrawCooldown(localWithdrawCooldownUntil)
 
   dispatch({
     type: 'WITHDRAW_STARTED',
     requested: toMoney(amount, 0),
+    cooldownMs: WITHDRAW_COOLDOWN_MS,
+    cooldownUntil: new Date(localWithdrawCooldownUntil).toISOString(),
   })
 
   if (!IS_PI) {
@@ -2809,6 +2991,7 @@ function startHopper(amount) {
         dispatch({
           type: 'WITHDRAW_COMPLETE',
           dispensed: emitted * 20,
+          cooldownUntil: new Date(localWithdrawCooldownUntil).toISOString(),
         })
         activeWithdrawalContext = null
         return
@@ -2929,6 +3112,7 @@ function stopHopper() {
     dispensed: hopperDispensed,
     requested: hopperTarget,
     aborted: wasAborted,
+    cooldownUntil: new Date(localWithdrawCooldownUntil).toISOString(),
   })
   activeWithdrawalContext = null
 }
@@ -5163,9 +5347,22 @@ const server = http.createServer((req, res) => {
         const balance = toMoney(state?.balance, 0)
         const hopperBalance = toMoney(state?.hopperBalance, 0)
         const withdrawEnabled = Boolean(state?.withdrawEnabled)
+        const cooldown = getWithdrawCooldownState(state)
+        const coinGuard =
+          IS_PI && hasSupabaseRpcConfig()
+            ? await fetchCoinWithdrawGuardState(DEVICE_ID)
+            : {
+                remainingMs: 0,
+                cooldownUntil: null,
+              }
+        const cooldownRemainingMs = Math.max(cooldown.remainingMs, coinGuard.remainingMs)
+        const cooldownUntil =
+          coinGuard.remainingMs > cooldown.remainingMs
+            ? coinGuard.cooldownUntil
+            : cooldown.cooldownUntil
         const configuredMax = state ? getMaxWithdrawalAmountForHopperBalance(hopperBalance) : null
         const maxWithdrawalAmount =
-          !withdrawEnabled || configuredMax === null
+          !withdrawEnabled || cooldownRemainingMs > 0 || configuredMax === null
             ? null
             : Math.max(0, Math.min(balance, hopperBalance, configuredMax))
 
@@ -5175,7 +5372,11 @@ const server = http.createServer((req, res) => {
           hopperBalance,
           maxWithdrawalAmount,
           configuredMax,
-          enabled: Boolean(IS_PI && hasSupabaseRpcConfig() && withdrawEnabled),
+          enabled: Boolean(
+            IS_PI && hasSupabaseRpcConfig() && withdrawEnabled && cooldownRemainingMs <= 0,
+          ),
+          cooldownRemainingMs,
+          cooldownUntil,
         })
       } catch (error) {
         console.error('[WITHDRAW] limits fetch failed', error)
