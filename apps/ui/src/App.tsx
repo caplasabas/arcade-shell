@@ -2318,6 +2318,11 @@ export default function App() {
       const data = event.data
       if (!data || typeof data !== 'object') return
 
+      if (data.type === 'ULTRAACE_ACTIVITY') {
+        markDeviceActivity()
+        return
+      }
+
       if (data.type === 'ULTRAACE_WITHDRAW_STATE') {
         const nextState: CasinoWithdrawState = {
           canOpen: Boolean(data.canOpen),
